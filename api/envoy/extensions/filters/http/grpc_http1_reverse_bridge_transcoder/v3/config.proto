@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package envoy.extensions.filters.http.grpc_http1_reverse_bridge_transcoder.v3;
+
+import "udpa/annotations/status.proto";
+import "udpa/annotations/versioning.proto";
+import "validate/validate.proto";
+
+option java_package = "io.envoyproxy.envoy.extensions.filters.http.grpc_http1_reverse_bridge_transcoder.v3";
+option java_outer_classname = "ConfigProto";
+option java_multiple_files = true;
+option go_package = "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3;grpc_http1_reverse_bridge_transcoderv3";
+option (udpa.annotations.file_status).package_version_status = ACTIVE;
+
+// gRPC reverse bridge filter configuration
+message FilterConfig {
+  option (udpa.annotations.versioning).previous_message_type =
+      "envoy.config.filter.http.grpc_http1_reverse_bridge_transcoder.v2alpha1.FilterConfig";
+
+  // Placeholder for the new paramters
+  string temp_param = 1 [(validate.rules).string = {min_len: 1}];
+}
+
+// gRPC reverse bridge filter configuration per virtualhost/route/weighted-cluster level.
+message FilterConfigPerRoute {
+  option (udpa.annotations.versioning).previous_message_type =
+      "envoy.config.filter.http.grpc_http1_reverse_bridge_transcoder.v2alpha1.FilterConfigPerRoute";
+
+  // If true, disables gRPC reverse bridge filter for this particular vhost or route.
+  // If disabled is specified in multiple per-filter-configs, the most specific one will be used.
+  bool disabled = 1;
+}

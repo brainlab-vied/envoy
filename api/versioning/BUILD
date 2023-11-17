@@ -123,6 +123,7 @@ proto_library(
         "//envoy/extensions/filters/http/grpc_field_extraction/v3:pkg",
         "//envoy/extensions/filters/http/grpc_http1_bridge/v3:pkg",
         "//envoy/extensions/filters/http/grpc_http1_reverse_bridge/v3:pkg",
+        "//envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3:pkg",
         "//envoy/extensions/filters/http/grpc_json_transcoder/v3:pkg",
         "//envoy/extensions/filters/http/grpc_stats/v3:pkg",
         "//envoy/extensions/filters/http/grpc_web/v3:pkg",

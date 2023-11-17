@@ -50,6 +50,8 @@ public:
   const std::string GrpcFieldExtraction = "envoy.filters.http.grpc_field_extraction";
   // GRPC http1 reverse bridge filter
   const std::string GrpcHttp1ReverseBridge = "envoy.filters.http.grpc_http1_reverse_bridge";
+  // GRPC http1 reverse bridge filter
+  const std::string GrpcHttp1ReverseBridgeTranscoder = "envoy.filters.http.grpc_http1_reverse_bridge_transcoder";
   // GRPC telemetry
   const std::string GrpcStats = "envoy.filters.http.grpc_stats";
   // IP tagging filter
