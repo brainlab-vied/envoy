@@ -67,7 +67,7 @@ public:
   FilterConfigPerRoute(
       const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfigPerRoute&
           config)
-      : disabled_(config.disabled()) {}
+      : disabled_(false) { (void) config; }
   bool disabled() const { return disabled_; }
 
 private:
