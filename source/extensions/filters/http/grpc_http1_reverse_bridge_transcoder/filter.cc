@@ -1,5 +1,5 @@
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/filter.h"
-
+#include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder_input_stream_impl.h"
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
 
@@ -119,7 +119,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
     }
 
     buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
-    prefix_stripped_ = true;
+        prefix_stripped_ = true;
   }
 
   return Http::FilterDataStatus::Continue;

@@ -11,8 +11,8 @@ envoy_extension_package()
 
 envoy_cc_library(
     name = "filter_lib",
-    srcs = ["filter.cc"],
-    hdrs = ["filter.h"],
+    srcs = ["filter.cc", "transcoder_input_stream_impl.cc"],
+    hdrs = ["filter.h", "transcoder_input_stream_impl.h"],
     external_deps = [
         "grpc_transcoding",
     ],
