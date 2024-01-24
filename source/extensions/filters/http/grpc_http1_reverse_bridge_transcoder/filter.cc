@@ -9,6 +9,8 @@
 #include "source/common/grpc/status.h"
 #include "source/common/http/headers.h"
 #include "source/common/http/utility.h"
+#include "source/common/protobuf/protobuf.h"
+#include "source/common/protobuf/utility.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -89,6 +91,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
     
     if (per_route_config != nullptr && per_route_config->disabled()) {
       enabled_ = false;
+      ENVOY_STREAM_LOG(debug, "Transcoding is disabled for the route. Request headers is passed through.", *decoder_callbacks_);
       return Http::FilterHeadersStatus::Continue;
     }
   }
@@ -104,22 +107,54 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
     decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
   }
+  else {
+    ENVOY_STREAM_LOG(debug,
+                     "Content-type is not application/grpc. Request is passed through "
+                     "without transcoding.",
+                     *decoder_callbacks_);
+  }
 
   return Http::FilterHeadersStatus::Continue;
 }
 
 Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
-  if (enabled_ && !prefix_stripped_) {
-    if (buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
-      decoder_callbacks_->sendLocalReply(Http::Code::OK, "invalid request body", nullptr,
-                                         Grpc::Status::WellKnownGrpcStatus::Unknown,
-                                         RcDetails::get().GrpcBridgeFailedTooSmall);
-      
-      return Http::FilterDataStatus::StopIterationNoBuffer;
-    }
+  if (enabled_) {
+    if(!prefix_stripped_) {
+      if (buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+        decoder_callbacks_->sendLocalReply(Http::Code::OK, "invalid request body", nullptr,
+                                          Grpc::Status::WellKnownGrpcStatus::Unknown,
+                                          RcDetails::get().GrpcBridgeFailedTooSmall);
+        
+        return Http::FilterDataStatus::StopIterationNoBuffer;
+      }
 
-    buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
-        prefix_stripped_ = true;
+      buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
+      prefix_stripped_ = true;
+    }
+    else {
+      Protobuf::util::JsonPrintOptions opts;
+      auto resolver = std::unique_ptr<Protobuf::util::TypeResolver> {
+          Protobuf::util::NewTypeResolverForDescriptorPool("", Protobuf::DescriptorPool::generated_pool())
+      };
+
+      auto inputBuffer = buffer.toString();
+      Protobuf::io::ArrayInputStream inputStream(inputBuffer.data(), inputBuffer.size());
+
+      std::string outputBuffer;
+      Protobuf::io::StringOutputStream outStream{std::addressof(outputBuffer)};
+
+      auto status = Protobuf::util::BinaryToJsonStream(resolver.get(), "/endpoints.HelloRequest", std::addressof(inputStream), std::addressof(outStream), opts);
+      
+      if(!status.ok()) {
+        ENVOY_STREAM_LOG(error,
+                        "Failed to transcode gRPC request to JSON: {}",
+                        *decoder_callbacks_, status.message());
+
+        decoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
+                  Grpc::Status::WellKnownGrpcStatus::Unknown,
+                  RcDetails::get().GrpcBridgeFailedTooSmall);
+      }
+    }
   }
 
   return Http::FilterDataStatus::Continue;
