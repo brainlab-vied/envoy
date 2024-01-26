@@ -13,10 +13,10 @@ namespace GrpcHttp1ReverseBridgeTranscoder {
 
 Http::FilterFactoryCb Config::createFilterFactoryFromProtoTyped(
     const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfig& config,
-    const std::string&, Server::Configuration::FactoryContext&) {
-  return [config](Envoy::Http::FilterChainFactoryCallbacks& callbacks) -> void {
-    callbacks.addStreamFilter(std::make_shared<Filter>(config.temp_param()));
-  };
+    const std::string&, Server::Configuration::FactoryContext& context) {
+  return [&, config](Envoy::Http::FilterChainFactoryCallbacks& callbacks) -> void {
+    callbacks.addStreamFilter(std::make_shared<Filter>(context.getServerFactoryContext().api(), config.temp_param()));
+      };
 }
 
 Router::RouteSpecificFilterConfigConstSharedPtr Config::createRouteSpecificFilterConfigTyped(

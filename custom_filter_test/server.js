@@ -19,9 +19,11 @@ async function run() {
       req.body instanceof Buffer &&
       req.body.length != 0
     ) {
-      const HelloRequest = root.lookupType("endpoints.HelloRequest");
-      const helloReq = HelloRequest.decode(req.body);
-      message += " " + helloReq.name;
+      //const HelloRequest = root.lookupType("endpoints.HelloRequest");
+      //const helloReq = HelloRequest.decode(req.body);
+
+      console.log(req.body)
+      message += " aca"; //helloReq.name;
     }
 
     res.header("Content-Type", "application/grpc");
