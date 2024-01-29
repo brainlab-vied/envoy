@@ -193,7 +193,7 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
   if (enabled_) {
     absl::string_view content_type = headers.getContentTypeValue();
 
-    // FIXME: When we add transcoding, resonses should be application/json or HttpBody
+    //FIXME: When we add transcoding, resonses should be application/json or HttpBody
     if (content_type != Http::Headers::get().ContentTypeValues.Json) {
       
       decoder_callbacks_->sendLocalReply(Http::Code::OK, badContentTypeMessage(headers), nullptr,
@@ -221,18 +221,75 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   }
 
   if (end_stream) {
+
+    ///MOVE to separate class
+    Envoy::Protobuf::FileDescriptorSet descSet;
+    Protobuf::DescriptorPool descPool;
+
+    auto fileOrError = api_.fileSystem().fileReadToEnd("/home/aled/envoy/custom_filter_test/hello.pb");
+    THROW_IF_STATUS_NOT_OK(fileOrError, throw);
+
+    bool parsed = descSet.ParseFromString(fileOrError.value());
+    if (!parsed) {
+      throw EnvoyException("transcoding_filter: Failed to parse /home/aled/envoy/custom_filter_test/hello.pb");
+    }
+
+    for (const auto& file : descSet.file()) {
+      descPool.BuildFile(file);
+    }
+
+    auto service = descPool.FindServiceByName("endpoints.Greeter"); // TODO: Service name as a param
+    if (service == nullptr) {
+      throw EnvoyException("transcoding_filter: Could not find 'endpoints.Greeter' in the proto descriptor");
+    }
+
+    Protobuf::util::JsonParseOptions parseopts;
+    auto resolver = std::unique_ptr<Protobuf::util::TypeResolver> {
+      Protobuf::util::NewTypeResolverForDescriptorPool("", std::addressof(descPool))
+    };
+    ///
+
+    const auto inputData = buffer_.toString();
+    Protobuf::io::ArrayInputStream zistream1(inputData.data(), inputData.size());
+    std::string result1;
+    Protobuf::io::StringOutputStream outstream1{&result1};
+
+
+    auto status = Protobuf::util::JsonToBinaryStream(resolver.get(), "/endpoints.HelloReply", std::addressof(zistream1), std::addressof(outstream1), parseopts);
+
+    if(!status.ok()) {
+      ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}",
+                        *encoder_callbacks_, status.message());
+
+      encoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
+                                        Grpc::Status::WellKnownGrpcStatus::Unknown,
+                                        RcDetails::get().GrpcBridgeFailedTooSmall);
+    }
+    else {
+      ENVOY_STREAM_LOG(debug, "Succesfully transcoded JSON response to gRPC", *encoder_callbacks_);
+    }
+
+
     // Insert grpc-status trailers to communicate the error code.
     auto& trailers = encoder_callbacks_->addEncodedTrailers();
     trailers.setGrpcStatus(grpc_status_);
 
-    buffer.prepend(buffer_);
+    for (std::size_t i = 0; i < result1.size(); i++)
+             ENVOY_STREAM_LOG(error, "temp0: {:x}", *decoder_callbacks_, result1[i]);
+
+    buffer.prepend(result1);
     buildGrpcFrameHeader(buffer, buffer.length());
+    
+    auto temp = buffer.toString();
+    for (std::size_t i = 0; i < temp.size(); i++)
+            ENVOY_STREAM_LOG(error, "temp: {:x}", *decoder_callbacks_, temp[i]);
     
     return Http::FilterDataStatus::Continue;
   }
 
   // Buffer the response in a mutable buffer: we need to determine the size of the response
   // and modify it later on.
+
   buffer_.move(buffer);
   return Http::FilterDataStatus::StopIterationAndBuffer;
 }

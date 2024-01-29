@@ -12,7 +12,7 @@ async function run() {
   const root = await protobuf.load(PROTO_PATH);
 
   app.post("/endpoints.Greeter/SayHello", (req, res) => {
-    var message = "Hello";
+    var message = "Hello aca";
     console.log('hello');
     if (
       req.body !== undefined &&
