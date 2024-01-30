@@ -46,11 +46,6 @@ private:
   bool enabled_{};
   bool prefix_stripped_{};
 
-  // Tracking state for gRPC frame status when withholding gRPC frames from the
-  // upstream and streaming responses.
-  bool frame_header_added_{};
-  // The content length reported by the upstream.
-  uint32_t response_message_length_{};
   // The actual size of the response returned by the upstream so far.
   uint32_t upstream_response_bytes_{};
 
