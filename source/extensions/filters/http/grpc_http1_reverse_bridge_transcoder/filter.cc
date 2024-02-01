@@ -1,5 +1,4 @@
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/filter.h"
-#include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder_input_stream_impl.h"
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
 
@@ -131,44 +130,11 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
       buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
       prefix_stripped_ = true;
 
-      ///MOVE to separate class
-      Envoy::Protobuf::FileDescriptorSet descSet;
-      Protobuf::DescriptorPool descPool;
-
-      auto fileOrError = api_.fileSystem().fileReadToEnd("/home/aled/envoy/custom_filter_test/hello.pb");
-      THROW_IF_STATUS_NOT_OK(fileOrError, throw);
-
-      bool parsed = descSet.ParseFromString(fileOrError.value());
-      if (!parsed) {
-        throw EnvoyException("transcoding_filter: Failed to parse /home/aled/envoy/custom_filter_test/hello.pb");
-      }
-
-      for (const auto& file : descSet.file()) {
-        descPool.BuildFile(file);
-      }
-
-      auto service = descPool.FindServiceByName("endpoints.Greeter"); // TODO: Service name as a param
-      if (service == nullptr) {
-        throw EnvoyException("transcoding_filter: Could not find 'endpoints.Greeter' in the proto descriptor");
-      }
-
-      Protobuf::util::JsonPrintOptions opts;
-      auto resolver = std::unique_ptr<Protobuf::util::TypeResolver> {
-        Protobuf::util::NewTypeResolverForDescriptorPool("", std::addressof(descPool))
-      };
-      ///
-
       Buffer::OwnedImpl workBuffer;
       workBuffer.move(buffer);
 
-      auto inputBuffer = workBuffer.toString();
-      Protobuf::io::ArrayInputStream inputStream(inputBuffer.data(), inputBuffer.size());
+      auto [status, outputData] = transcoder_.fromGrpcBufferToJson(workBuffer);
 
-      std::string outputData;
-      Protobuf::io::StringOutputStream outStream{std::addressof(outputData)};
-
-      auto status = Protobuf::util::BinaryToJsonStream(resolver.get(), "/endpoints.HelloRequest", std::addressof(inputStream), std::addressof(outStream), opts);
-      
       if(!status.ok()) {
         ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}",
                          *decoder_callbacks_, status.message());
@@ -222,40 +188,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
   if (end_stream) {
 
-    ///MOVE to separate class
-    Envoy::Protobuf::FileDescriptorSet descSet;
-    Protobuf::DescriptorPool descPool;
-
-    auto fileOrError = api_.fileSystem().fileReadToEnd("/home/aled/envoy/custom_filter_test/hello.pb");
-    THROW_IF_STATUS_NOT_OK(fileOrError, throw);
-
-    bool parsed = descSet.ParseFromString(fileOrError.value());
-    if (!parsed) {
-      throw EnvoyException("transcoding_filter: Failed to parse /home/aled/envoy/custom_filter_test/hello.pb");
-    }
-
-    for (const auto& file : descSet.file()) {
-      descPool.BuildFile(file);
-    }
-
-    auto service = descPool.FindServiceByName("endpoints.Greeter"); // TODO: Service name as a param
-    if (service == nullptr) {
-      throw EnvoyException("transcoding_filter: Could not find 'endpoints.Greeter' in the proto descriptor");
-    }
-
-    Protobuf::util::JsonParseOptions parseopts;
-    auto resolver = std::unique_ptr<Protobuf::util::TypeResolver> {
-      Protobuf::util::NewTypeResolverForDescriptorPool("", std::addressof(descPool))
-    };
-    ///
-
-    const auto inputData = buffer_.toString();
-    Protobuf::io::ArrayInputStream zistream1(inputData.data(), inputData.size());
-    std::string result1;
-    Protobuf::io::StringOutputStream outstream1{&result1};
-
-
-    auto status = Protobuf::util::JsonToBinaryStream(resolver.get(), "/endpoints.HelloReply", std::addressof(zistream1), std::addressof(outstream1), parseopts);
+    auto [status, outputData] = transcoder_.fromJsonBufferToGrpc(buffer_);
 
     if(!status.ok()) {
       ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}",
@@ -269,20 +202,12 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
       ENVOY_STREAM_LOG(debug, "Succesfully transcoded JSON response to gRPC", *encoder_callbacks_);
     }
 
-
     // Insert grpc-status trailers to communicate the error code.
     auto& trailers = encoder_callbacks_->addEncodedTrailers();
     trailers.setGrpcStatus(grpc_status_);
 
-    for (std::size_t i = 0; i < result1.size(); i++)
-             ENVOY_STREAM_LOG(error, "temp0: {:x}", *decoder_callbacks_, result1[i]);
-
-    buffer.prepend(result1);
+    buffer.prepend(outputData);
     buildGrpcFrameHeader(buffer, buffer.length());
-    
-    auto temp = buffer.toString();
-    for (std::size_t i = 0; i < temp.size(); i++)
-            ENVOY_STREAM_LOG(error, "temp: {:x}", *decoder_callbacks_, temp[i]);
     
     return Http::FilterDataStatus::Continue;
   }

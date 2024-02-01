@@ -85,7 +85,10 @@ mkdir -p "${ENVOY_DOCKER_BUILD_DIR}"
 [[ -f .git ]] && [[ ! -d .git ]] && ENVOY_DOCKER_OPTIONS+=(-v "$(git rev-parse --git-common-dir):$(git rev-parse --git-common-dir)")
 [[ -n "${SSH_AUTH_SOCK}" ]] && ENVOY_DOCKER_OPTIONS+=(-v "${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}" -e SSH_AUTH_SOCK)
 
-export ENVOY_BUILD_IMAGE="${IMAGE_NAME}:${IMAGE_ID}"
+#export ENVOY_BUILD_IMAGE="${IMAGE_NAME}:${IMAGE_ID}"
+export ENVOY_BUILD_IMAGE="envoyproxy/envoy-build-ubuntu:0ca52447572ee105a4730da5e76fe47c9c5a7c64@sha256:d3aee8a0f82169f7b28f0aaa697837693a275ffca3bd55742a41b09ef4101e35"
+echo "ENVOY_BUILD_IMAGE: ${IMAGE_NAME}:${IMAGE_ID}"
+echo "new ENVOY_BUILD_IMAGE: ${IMAGE_NAME}:${IMAGE_ID}"
 
 VOLUMES=(
     -v "${ENVOY_DOCKER_BUILD_DIR}":"${BUILD_DIR_MOUNT_DEST}"
@@ -110,6 +113,7 @@ fi
 if [[ -n "${ENVOY_DOCKER_PULL}" ]]; then
     time docker pull "${ENVOY_BUILD_IMAGE}"
 fi
+
 
 # Since we specify an explicit hash, docker-run will pull from the remote repo if missing.
 docker run --rm \

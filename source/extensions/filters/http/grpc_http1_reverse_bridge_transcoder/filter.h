@@ -9,7 +9,7 @@
 #include "source/common/buffer/buffer_impl.h"
 #include "source/common/grpc/status.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
-
+#include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder.h"
 #include "source/common/common/logger.h"
 
 #include "absl/types/optional.h"
@@ -23,7 +23,7 @@ namespace GrpcHttp1ReverseBridgeTranscoder {
 class Filter : public Envoy::Http::PassThroughFilter, public Logger::Loggable<Logger::Id::filter> {
 public:
   Filter( Api::Api& api, std::string temp_param)
-      : api_{api}, _temp_param(std::move(temp_param)) {}
+      : api_{api}, transcoder_{api}, _temp_param(std::move(temp_param)) {}
   // Http::StreamDecoderFilter
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
                                           bool end_stream) override;
@@ -40,6 +40,7 @@ private:
   void buildGrpcFrameHeader(Buffer::Instance& buffer, uint32_t message_length);
 
   Api::Api& api_;
+  Transcoder transcoder_;
     // FIXME: Add real paramters
   const std::string _temp_param;
 
