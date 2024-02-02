@@ -84,13 +84,15 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
   // Disable filter per route config if applies
   if (decoder_callbacks_->route() != nullptr) {
-    
+
     const auto* per_route_config =
         Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(decoder_callbacks_);
-    
+
     if (per_route_config != nullptr && per_route_config->disabled()) {
       enabled_ = false;
-      ENVOY_STREAM_LOG(debug, "Transcoding is disabled for the route. Request headers is passed through.", *decoder_callbacks_);
+      ENVOY_STREAM_LOG(debug,
+                       "Transcoding is disabled for the route. Request headers is passed through.",
+                       *decoder_callbacks_);
       return Http::FilterHeadersStatus::Continue;
     }
   }
@@ -98,15 +100,14 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   if (Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
     enabled_ = true;
 
-    // FIXME: When we add transcoding, resonses should be application/json or HttpBody
+    // FIXME: Handle HttpBody
     headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
     headers.setInline(accept_handle.handle(), Http::Headers::get().ContentTypeValues.Json);
 
     adjustContentLength(headers, [](auto size) { return size - Grpc::GRPC_FRAME_HEADER_SIZE; });
 
     decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
-  }
-  else {
+  } else {
     ENVOY_STREAM_LOG(debug,
                      "Content-type is not application/grpc. Request is passed through "
                      "without transcoding.",
@@ -118,12 +119,12 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
 Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
   if (enabled_) {
-    if(!prefix_stripped_) {
+    if (!prefix_stripped_) {
       if (buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
         decoder_callbacks_->sendLocalReply(Http::Code::OK, "invalid request body", nullptr,
-                                          Grpc::Status::WellKnownGrpcStatus::Unknown,
-                                          RcDetails::get().GrpcBridgeFailedTooSmall);
-        
+                                           Grpc::Status::WellKnownGrpcStatus::Unknown,
+                                           RcDetails::get().GrpcBridgeFailedTooSmall);
+
         return Http::FilterDataStatus::StopIterationNoBuffer;
       }
 
@@ -135,17 +136,15 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
 
       auto [status, outputData] = transcoder_.fromGrpcBufferToJson(workBuffer);
 
-      if(!status.ok()) {
-        ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}",
-                         *decoder_callbacks_, status.message());
+      if (!status.ok()) {
+        ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}", *decoder_callbacks_,
+                         status.message());
 
-        decoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
-                                          Grpc::Status::WellKnownGrpcStatus::Unknown,
-                                          RcDetails::get().GrpcBridgeFailedTooSmall);
-      }
-      else {
+        decoder_callbacks_->sendLocalReply(
+            Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
+            Grpc::Status::WellKnownGrpcStatus::Unknown, RcDetails::get().GrpcBridgeFailedTooSmall);
+      } else {
         ENVOY_STREAM_LOG(debug, "Succesfully transcoded gRPC request to JSON", *decoder_callbacks_);
-        ENVOY_STREAM_LOG(debug, "Transcoded request: {}", *decoder_callbacks_, outputData);
       }
 
       buffer.add(outputData);
@@ -159,13 +158,13 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
   if (enabled_) {
     absl::string_view content_type = headers.getContentTypeValue();
 
-    //FIXME: When we add transcoding, resonses should be application/json or HttpBody
+    // FIXME: When we add transcoding, resonses should be application/json or HttpBody
     if (content_type != Http::Headers::get().ContentTypeValues.Json) {
-      
+
       decoder_callbacks_->sendLocalReply(Http::Code::OK, badContentTypeMessage(headers), nullptr,
                                          Grpc::Status::WellKnownGrpcStatus::Unknown,
                                          RcDetails::get().GrpcBridgeFailedContentType);
-      
+
       return Http::FilterHeadersStatus::StopIteration;
     }
 
@@ -190,15 +189,14 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
     auto [status, outputData] = transcoder_.fromJsonBufferToGrpc(buffer_);
 
-    if(!status.ok()) {
-      ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}",
-                        *encoder_callbacks_, status.message());
+    if (!status.ok()) {
+      ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}", *encoder_callbacks_,
+                       status.message());
 
-      encoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
-                                        Grpc::Status::WellKnownGrpcStatus::Unknown,
-                                        RcDetails::get().GrpcBridgeFailedTooSmall);
-    }
-    else {
+      encoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode gRPC request to JSON",
+                                         nullptr, Grpc::Status::WellKnownGrpcStatus::Unknown,
+                                         RcDetails::get().GrpcBridgeFailedTooSmall);
+    } else {
       ENVOY_STREAM_LOG(debug, "Succesfully transcoded JSON response to gRPC", *encoder_callbacks_);
     }
 
@@ -208,7 +206,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
     buffer.prepend(outputData);
     buildGrpcFrameHeader(buffer, buffer.length());
-    
+
     return Http::FilterDataStatus::Continue;
   }
 

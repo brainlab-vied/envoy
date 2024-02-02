@@ -12,16 +12,21 @@ namespace HttpFilters {
 namespace GrpcHttp1ReverseBridgeTranscoder {
 
 Http::FilterFactoryCb Config::createFilterFactoryFromProtoTyped(
-    const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfig& config,
+    const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfig&
+        config,
     const std::string&, Server::Configuration::FactoryContext& context) {
-  return [&, config](Envoy::Http::FilterChainFactoryCallbacks& callbacks) -> void {
-    callbacks.addStreamFilter(std::make_shared<Filter>(context.getServerFactoryContext().api(), config.temp_param()));
-      };
+
+  auto filter_config =
+      std::make_shared<Filter>(context.getServerFactoryContext().api(), config.temp_param());
+
+  return [filter_config](Envoy::Http::FilterChainFactoryCallbacks& callbacks) -> void {
+    callbacks.addStreamFilter(filter_config);
+  };
 }
 
 Router::RouteSpecificFilterConfigConstSharedPtr Config::createRouteSpecificFilterConfigTyped(
-    const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfigPerRoute&
-        proto_config,
+    const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::
+        FilterConfigPerRoute& proto_config,
     Server::Configuration::ServerFactoryContext&, ProtobufMessage::ValidationVisitor&) {
   return std::make_shared<FilterConfigPerRoute>(proto_config);
 }
@@ -31,7 +36,7 @@ Router::RouteSpecificFilterConfigConstSharedPtr Config::createRouteSpecificFilte
  */
 REGISTER_FACTORY(Config, Server::Configuration::NamedHttpFilterConfigFactory);
 
-} // namespace GrpcHttp1ReverseBridge
+} // namespace GrpcHttp1ReverseBridgeTranscoder
 } // namespace HttpFilters
 } // namespace Extensions
 } // namespace Envoy

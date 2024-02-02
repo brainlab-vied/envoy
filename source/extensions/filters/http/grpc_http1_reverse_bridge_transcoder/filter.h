@@ -22,7 +22,7 @@ namespace GrpcHttp1ReverseBridgeTranscoder {
 // When enabled, will downgrade an incoming gRPC http request into a h/1.1 request.
 class Filter : public Envoy::Http::PassThroughFilter, public Logger::Loggable<Logger::Id::filter> {
 public:
-  Filter( Api::Api& api, std::string temp_param)
+  Filter(Api::Api& api, std::string temp_param)
       : api_{api}, transcoder_{api}, _temp_param(std::move(temp_param)) {}
   // Http::StreamDecoderFilter
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
@@ -41,7 +41,7 @@ private:
 
   Api::Api& api_;
   Transcoder transcoder_;
-    // FIXME: Add real paramters
+  // FIXME: Add real paramters
   const std::string _temp_param;
 
   bool enabled_{};
@@ -61,10 +61,11 @@ using FilterPtr = std::unique_ptr<Filter>;
 
 class FilterConfigPerRoute : public Router::RouteSpecificFilterConfig {
 public:
-  FilterConfigPerRoute(
-      const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfigPerRoute&
-          config)
-      : disabled_(false) { (void) config; }
+  FilterConfigPerRoute(const envoy::extensions::filters::http::
+                           grpc_http1_reverse_bridge_transcoder::v3::FilterConfigPerRoute& config)
+      : disabled_(false) {
+    (void)config;
+  }
   bool disabled() const { return disabled_; }
 
 private:
