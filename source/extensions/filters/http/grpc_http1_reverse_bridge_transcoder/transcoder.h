@@ -13,7 +13,7 @@ namespace GrpcHttp1ReverseBridgeTranscoder {
 
 class Transcoder : public Logger::Loggable<Logger::Id::filter> {
 public:
-  Transcoder(Api::Api& api);
+  Transcoder(Api::Api& api, std::string proto_descriptor, std::string service_name);
 
   std::pair<absl::Status, std::string> fromGrpcBufferToJson(Buffer::OwnedImpl& buffer);
   std::pair<absl::Status, std::string> fromJsonBufferToGrpc(Buffer::OwnedImpl& buffer);

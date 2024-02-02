@@ -5,24 +5,22 @@ namespace Extensions {
 namespace HttpFilters {
 namespace GrpcHttp1ReverseBridgeTranscoder {
 
-Transcoder::Transcoder(Api::Api& api) {
-  auto fileOrError = api.fileSystem().fileReadToEnd("/home/aled/envoy/custom_filter_test/hello.pb");
+Transcoder::Transcoder(Api::Api& api, std::string proto_descriptor, std::string service_name) {
+  auto fileOrError = api.fileSystem().fileReadToEnd(proto_descriptor);
   THROW_IF_STATUS_NOT_OK(fileOrError, throw);
 
   bool parsed = descSet_.ParseFromString(fileOrError.value());
   if (!parsed) {
-    throw EnvoyException("GrpcHttp1ReverseBridgeTranscoder: Failed to parse "
-                         "/home/aled/envoy/custom_filter_test/hello.pb");
+    throw EnvoyException(absl::StrCat("GrpcHttp1ReverseBridgeTranscoder: Failed to parse ", proto_descriptor));
   }
 
   for (const auto& file : descSet_.file()) {
     descPool_.BuildFile(file);
   }
 
-  serviceDesc_ = descPool_.FindServiceByName("endpoints.Greeter"); // TODO: Service name as a param
+  serviceDesc_ = descPool_.FindServiceByName(service_name);
   if (!serviceDesc_) {
-    throw EnvoyException("GrpcHttp1ReverseBridgeTranscoder: Could not find 'endpoints.Greeter' in "
-                         "the proto descriptor");
+    throw EnvoyException(absl::StrCat("GrpcHttp1ReverseBridgeTranscoder: Could not find '", service_name, "' in the proto descriptor"));
   }
 
   resolver_ = std::unique_ptr<Protobuf::util::TypeResolver>{
@@ -69,7 +67,7 @@ std::pair<absl::Status, std::string> Transcoder::fromJsonBufferToGrpc(Buffer::Ow
   if (!methodDesc) {
     throw EnvoyException("GrpcHttp1ReverseBridgeTranscoder: Method does not exist: endpoints.Greeter/SayHello");    
   }
-  
+
   auto status = Protobuf::util::JsonToBinaryStream(
       resolver_.get(), "/" + methodDesc->output_type()->full_name(), std::addressof(inputStream),
       std::addressof(outputStream), opts);

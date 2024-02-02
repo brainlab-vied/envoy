@@ -17,7 +17,7 @@ Http::FilterFactoryCb Config::createFilterFactoryFromProtoTyped(
     const std::string&, Server::Configuration::FactoryContext& context) {
 
   auto filter_config =
-      std::make_shared<Filter>(context.getServerFactoryContext().api(), config.temp_param());
+      std::make_shared<Filter>(context.getServerFactoryContext().api(), config.proto_descriptor(), config.service());
 
   return [filter_config](Envoy::Http::FilterChainFactoryCallbacks& callbacks) -> void {
     callbacks.addStreamFilter(filter_config);
