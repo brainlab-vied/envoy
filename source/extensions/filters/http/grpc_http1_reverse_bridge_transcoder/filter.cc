@@ -100,6 +100,8 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   if (Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
     enabled_ = true;
 
+    transcoder_.setCurrentMethod(headers.getPathValue());
+
     // FIXME: Handle HttpBody
     headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
     headers.setInline(accept_handle.handle(), Http::Headers::get().ContentTypeValues.Json);
