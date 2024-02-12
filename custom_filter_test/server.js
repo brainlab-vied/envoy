@@ -4,7 +4,7 @@ const protobuf = require("protobufjs");
 const express = require("express");
 
 const app = express();
-//app.use(express.raw({ type: "application/grpc" }));
+app.use(express.raw({ type: "application/grpc" }));
 
 async function run() {
   console.log('run');
@@ -12,18 +12,18 @@ async function run() {
   const root = await protobuf.load(PROTO_PATH);
 
   app.post("/endpoints.Greeter/SayHello", (req, res) => {
-    var message = "Hello aca";
+    var message = "Hello ";
     console.log('hello');
     if (
       req.body !== undefined &&
       req.body instanceof Buffer &&
       req.body.length != 0
     ) {
-      //const HelloRequest = root.lookupType("endpoints.HelloRequest");
-      //const helloReq = HelloRequest.decode(req.body);
+      const HelloRequest = root.lookupType("endpoints.HelloRequest");
+      const helloReq = HelloRequest.decode(req.body);
 
       console.log(req.body)
-      message += " aca"; //helloReq.name;
+      message += helloReq.name;
     }
 
     res.header("Content-Type", "application/grpc");
@@ -31,6 +31,9 @@ async function run() {
     const HelloReply = root.lookupType("endpoints.HelloReply");
     res.send(HelloReply.encode({ message: message }).finish());
     res.end();
+
+    var headers = res.getHeaders();
+    console.log(headers);
     console.log('end');
   });
 

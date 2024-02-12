@@ -120,7 +120,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 }
 
 Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
-  if (enabled_) {
+    if (enabled_) {
     if (!prefix_stripped_) {
       if (buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
         decoder_callbacks_->sendLocalReply(Http::Code::OK, "invalid request body", nullptr,
@@ -172,9 +172,10 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
 
     // FIXME: When we add transcoding, resonses should be application/grpc or HttpBody
     headers.setContentType(Http::Headers::get().ContentTypeValues.Grpc);
+    headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Grpc);
 
-    adjustContentLength(headers, [](auto length) { return length + Grpc::GRPC_FRAME_HEADER_SIZE; });
-
+    //adjustContentLength(headers, [](auto length) { return length + Grpc::GRPC_FRAME_HEADER_SIZE; });
+    headers.setContentLength(16);
     grpc_status_ = grpcStatusFromHeaders(headers);
   }
 
@@ -182,7 +183,6 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
 }
 
 Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_stream) {
-  upstream_response_bytes_ += buffer.length();
   if (!enabled_) {
     return Http::FilterDataStatus::Continue;
   }

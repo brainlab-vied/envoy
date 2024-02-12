@@ -11,7 +11,7 @@ def json_endpoint():
          print('headers:')
          print(request.headers)
 
-         result = {"message": "hello aca"}
+         result = {'message': 'hello Aca'}
          return jsonify(result), 200
 
     except Exception as e:
@@ -19,5 +19,4 @@ def json_endpoint():
          return jsonify(error_message), 400
 
 if __name__ == '__main__':
-    print('aaaaaaaaaaaa')
     app.run(host="0.0.0.0")
