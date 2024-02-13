@@ -47,7 +47,7 @@ private:
 
 class Transcoder : public Logger::Loggable<Logger::Id::filter> {
 public:
-  Transcoder(Api::Api& api, std::string proto_descriptor, std::string service_name);
+  Transcoder(Api::Api& api, const std::string& proto_descriptor, const std::string& service_name);
 
   std::pair<absl::Status, std::string> fromGrpcBufferToJson(Buffer::OwnedImpl& buffer);
   std::pair<absl::Status, std::string> fromJsonBufferToGrpc(Buffer::OwnedImpl& buffer);

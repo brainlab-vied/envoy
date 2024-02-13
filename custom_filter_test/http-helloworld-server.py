@@ -11,7 +11,9 @@ def json_endpoint():
          print('headers:')
          print(request.headers)
 
-         result = {'message': 'hello Aca'}
+         name_json = request.get_json()
+         
+         result = {'message': 'Hello ' + name_json['name'] }
          return jsonify(result), 200
 
     except Exception as e:

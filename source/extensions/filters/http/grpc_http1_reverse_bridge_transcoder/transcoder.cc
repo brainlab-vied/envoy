@@ -5,7 +5,7 @@ namespace Extensions {
 namespace HttpFilters {
 namespace GrpcHttp1ReverseBridgeTranscoder {
 
-Transcoder::Transcoder(Api::Api& api, std::string proto_descriptor, std::string service_name) {
+Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const std::string& service_name) {
   auto fileOrError = api.fileSystem().fileReadToEnd(proto_descriptor);
   THROW_IF_STATUS_NOT_OK(fileOrError, throw);
 
