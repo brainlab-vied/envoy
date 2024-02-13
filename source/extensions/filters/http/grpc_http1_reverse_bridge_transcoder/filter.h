@@ -23,7 +23,7 @@ namespace GrpcHttp1ReverseBridgeTranscoder {
 class Filter : public Envoy::Http::PassThroughFilter, public Logger::Loggable<Logger::Id::filter> {
 public:
   Filter(Api::Api& api, std::string proto_descriptor, std::string service_name)
-      : api_{api}, transcoder_{api, std::move(proto_descriptor), std::move(service_name)} {}
+      : transcoder_{api, std::move(proto_descriptor), std::move(service_name)} {}
   // Http::StreamDecoderFilter
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
                                           bool end_stream) override;
@@ -39,7 +39,6 @@ private:
   // Prepend the grpc frame into the buffer
   void buildGrpcFrameHeader(Buffer::Instance& buffer, uint32_t message_length);
 
-  Api::Api& api_;
   Transcoder transcoder_;
 
   bool enabled_{};
