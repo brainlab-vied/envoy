@@ -41,10 +41,10 @@ Transcoder::Transcoder(Api::Api& api, std::string proto_descriptor, std::string 
     }
 
     method_resolver_.emplace(method_desc->name(),
-                             MethodInfo{.method_desc = method_desc,
-                                        .request_desc = method_desc->input_type(),
-                                        .response_desc = method_desc->output_type(),
-                                        .http_rule = http_rule});
+                             MethodInfo{method_desc,
+                                        method_desc->input_type(),
+                                        method_desc->output_type(),
+                                        http_rule});
   }
 }
 
