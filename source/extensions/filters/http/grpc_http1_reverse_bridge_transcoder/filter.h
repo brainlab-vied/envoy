@@ -42,13 +42,11 @@ private:
   Transcoder transcoder_;
 
   bool enabled_{};
-  bool prefix_stripped_{};
-
-  // The actual size of the response returned by the upstream so far.
-  uint32_t upstream_response_bytes_{};
+  bool strip_grpc_header_{};
 
   std::string content_type_{};
   Grpc::Status::GrpcStatus grpc_status_{};
+
   // Normally we'd use the encoding buffer, but since we need to mutate the
   // buffer we instead maintain our own.
   Buffer::OwnedImpl buffer_{};

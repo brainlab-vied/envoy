@@ -61,6 +61,8 @@ std::string badContentTypeMessage(const Http::ResponseHeaderMap& headers) {
   }
 }
 
+/*
+// TODO: Reenable me after adding contentLength header support
 void adjustContentLength(Http::RequestOrResponseHeaderMap& headers,
                          const std::function<uint64_t(uint64_t value)>& adjustment) {
   auto length_header = headers.getContentLengthValue();
@@ -73,6 +75,7 @@ void adjustContentLength(Http::RequestOrResponseHeaderMap& headers,
     }
   }
 }
+*/
 } // namespace
 
 Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers, bool end_stream) {
@@ -99,14 +102,16 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
   if (Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
     enabled_ = true;
-
+    strip_grpc_header_ = true;
     transcoder_.setCurrentMethod(headers.getPathValue());
 
     // FIXME: Handle HttpBody
     headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
     headers.setInline(accept_handle.handle(), Http::Headers::get().ContentTypeValues.Json);
 
-    adjustContentLength(headers, [](auto size) { return size - Grpc::GRPC_FRAME_HEADER_SIZE; });
+    // TODO: Ass of yet the content length is okay. It needs to be recalculated after json transcoding.
+    // adjustContentLength(headers, [](auto size) { return size - Grpc::GRPC_FRAME_HEADER_SIZE; });
+    headers.removeContentLength();
 
     decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
   } else {
@@ -120,64 +125,68 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 }
 
 Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool) {
-    if (enabled_) {
-    if (!prefix_stripped_) {
-      if (buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
-        decoder_callbacks_->sendLocalReply(Http::Code::OK, "invalid request body", nullptr,
-                                           Grpc::Status::WellKnownGrpcStatus::Unknown,
-                                           RcDetails::get().GrpcBridgeFailedTooSmall);
-
-        return Http::FilterDataStatus::StopIterationNoBuffer;
-      }
-
-      buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
-      prefix_stripped_ = true;
-
-      Buffer::OwnedImpl workBuffer;
-      workBuffer.move(buffer);
-
-      auto [status, outputData] = transcoder_.fromGrpcBufferToJson(workBuffer);
-
-      if (!status.ok()) {
-        ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}", *decoder_callbacks_,
-                         status.message());
-
-        decoder_callbacks_->sendLocalReply(
-            Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
-            Grpc::Status::WellKnownGrpcStatus::Unknown, RcDetails::get().GrpcBridgeFailedTooSmall);
-      } else {
-        ENVOY_STREAM_LOG(debug, "Succesfully transcoded gRPC request to JSON", *decoder_callbacks_);
-      }
-
-      buffer.add(outputData);
-    }
+  // NOTE: Maps gRPC to json
+  if (!enabled_) {
+    return Http::FilterDataStatus::Continue;
   }
 
+  if (strip_grpc_header_) {
+    if (buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+      decoder_callbacks_->sendLocalReply(Http::Code::OK, "invalid request body", nullptr,
+                                         Grpc::Status::WellKnownGrpcStatus::Unknown,
+                                         RcDetails::get().GrpcBridgeFailedTooSmall);
+
+      return Http::FilterDataStatus::StopIterationNoBuffer;
+    }
+
+    buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
+    strip_grpc_header_ = false;
+  }
+
+  Buffer::OwnedImpl workBuffer{buffer};
+  auto [status, outputData] = transcoder_.fromGrpcBufferToJson(workBuffer);
+
+  if (!status.ok()) {
+    ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}", *decoder_callbacks_,
+                     status.message());
+
+    decoder_callbacks_->sendLocalReply(
+        Http::Code::OK, "Failed to transcode gRPC request to JSON", nullptr,
+        Grpc::Status::WellKnownGrpcStatus::Unknown, RcDetails::get().GrpcBridgeFailedTooSmall);
+        // TODO: Respond with some kind of error?
+  } else {
+    ENVOY_STREAM_LOG(debug, "Succesfully transcoded gRPC request to JSON", *decoder_callbacks_);
+  }
+
+  buffer.drain(buffer.length());
+  buffer.add(outputData);
   return Http::FilterDataStatus::Continue;
 }
 
 Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers, bool) {
-  if (enabled_) {
-    absl::string_view content_type = headers.getContentTypeValue();
-
-    // FIXME: When we add transcoding, resonses should be application/json or HttpBody
-    if (content_type != Http::Headers::get().ContentTypeValues.Json) {
-
-      decoder_callbacks_->sendLocalReply(Http::Code::OK, badContentTypeMessage(headers), nullptr,
-                                         Grpc::Status::WellKnownGrpcStatus::Unknown,
-                                         RcDetails::get().GrpcBridgeFailedContentType);
-
-      return Http::FilterHeadersStatus::StopIteration;
-    }
-
-    // FIXME: When we add transcoding, resonses should be application/grpc or HttpBody
-    headers.setContentType(Http::Headers::get().ContentTypeValues.Grpc);
-    headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Grpc);
-
-    //adjustContentLength(headers, [](auto length) { return length + Grpc::GRPC_FRAME_HEADER_SIZE; });
-    headers.setContentLength(16);
-    grpc_status_ = grpcStatusFromHeaders(headers);
+  if (!enabled_) {
+    return Http::FilterHeadersStatus::Continue;
   }
+
+  absl::string_view content_type = headers.getContentTypeValue();
+
+  // FIXME: When we add transcoding, resonses should be application/json or HttpBody
+  if (content_type != Http::Headers::get().ContentTypeValues.Json) {
+    decoder_callbacks_->sendLocalReply(Http::Code::OK, badContentTypeMessage(headers), nullptr,
+                                       Grpc::Status::WellKnownGrpcStatus::Unknown,
+                                       RcDetails::get().GrpcBridgeFailedContentType);
+
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+
+  // FIXME: When we add transcoding, resonses should be application/grpc or HttpBody
+  headers.setContentType(Http::Headers::get().ContentTypeValues.Grpc);
+  headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Grpc);
+
+  //adjustContentLength(headers, [](auto length) { return length + Grpc::GRPC_FRAME_HEADER_SIZE; });
+  //headers.setContentLength(16);
+  headers.removeContentLength();
+  grpc_status_ = grpcStatusFromHeaders(headers);
 
   return Http::FilterHeadersStatus::Continue;
 }
@@ -192,10 +201,10 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
     auto [status, outputData] = transcoder_.fromJsonBufferToGrpc(buffer_);
 
     if (!status.ok()) {
-      ENVOY_STREAM_LOG(error, "Failed to transcode gRPC request to JSON: {}", *encoder_callbacks_,
+      ENVOY_STREAM_LOG(error, "Failed to transcode JSON response to gRPC: {}", *encoder_callbacks_,
                        status.message());
 
-      encoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode gRPC request to JSON",
+      encoder_callbacks_->sendLocalReply(Http::Code::OK, "Failed to transcode JSON response to gRPC",
                                          nullptr, Grpc::Status::WellKnownGrpcStatus::Unknown,
                                          RcDetails::get().GrpcBridgeFailedTooSmall);
     } else {

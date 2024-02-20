@@ -1,0 +1,19 @@
+// TODO: Add Header
+
+syntax = "proto3";
+
+package testing;
+
+service TestService {
+  rpc ping (PingRequest) returns (PingResponse) {}
+}
+
+message PingRequest {
+  uint32 counter = 1;
+}
+
+message PingResponse {
+  PingRequest ping = 1;
+  uint32 counter = 2;
+}
+

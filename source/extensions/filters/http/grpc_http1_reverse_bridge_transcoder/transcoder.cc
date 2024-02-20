@@ -32,7 +32,7 @@ Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const
                                       service_name, "' in the proto descriptor"));
   }
 
-  for (int i = 0; i < service_desc_->method_count(); i++) {
+  for (int i = 0; i < service_desc_->method_count(); ++i) {
     const auto* method_desc = service_desc_->method(i);
 
     google::api::HttpRule http_rule;
@@ -56,6 +56,8 @@ std::pair<absl::Status, std::string> Transcoder::fromGrpcBufferToJson(Buffer::Ow
   Protobuf::io::StringOutputStream outputStream{std::addressof(outputData)};
 
   Protobuf::util::JsonPrintOptions opts;
+  opts.preserve_proto_field_names = true;
+  opts.always_print_primitive_fields = true;
 
   if (method_resolver_.contain(method_name_)) {
 
@@ -77,6 +79,8 @@ std::pair<absl::Status, std::string> Transcoder::fromJsonBufferToGrpc(Buffer::Ow
   Protobuf::io::StringOutputStream outputStream{std::addressof(outputData)};
 
   Protobuf::util::JsonParseOptions opts;
+  opts.case_insensitive_enum_parsing = true;
+  opts.ignore_unknown_fields = false;
 
   if (method_resolver_.contain(method_name_)) {
 
