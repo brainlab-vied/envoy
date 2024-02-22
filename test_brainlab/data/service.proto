@@ -1,11 +1,15 @@
-// TODO: Add Header
-
 syntax = "proto3";
 
 package testing;
+import "google/api/annotations.proto";
 
 service TestService {
-  rpc ping (PingRequest) returns (PingResponse) {}
+  rpc ping (PingRequest) returns (PingResponse) {
+    option (google.api.http) = {
+      post: "/ping"
+      body: "*"
+    };
+  }
 }
 
 message PingRequest {
@@ -16,4 +20,3 @@ message PingResponse {
   PingRequest ping = 1;
   uint32 counter = 2;
 }
-
