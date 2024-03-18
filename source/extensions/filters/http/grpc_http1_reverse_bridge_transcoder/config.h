@@ -6,10 +6,7 @@
 
 #include "source/extensions/filters/http/common/factory_base.h"
 
-namespace Envoy {
-namespace Extensions {
-namespace HttpFilters {
-namespace GrpcHttp1ReverseBridgeTranscoder {
+namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
 class Config
     : public Common::FactoryBase<
@@ -32,7 +29,4 @@ private:
       Server::Configuration::ServerFactoryContext& context,
       ProtobufMessage::ValidationVisitor& validator) override;
 };
-} // namespace GrpcHttp1ReverseBridgeTranscoder
-} // namespace HttpFilters
-} // namespace Extensions
-} // namespace Envoy
+} // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder

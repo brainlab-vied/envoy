@@ -10,10 +10,7 @@
 #include "google/api/http.pb.h"
 #include "google/api/httpbody.pb.h"
 
-namespace Envoy {
-namespace Extensions {
-namespace HttpFilters {
-namespace GrpcHttp1ReverseBridgeTranscoder {
+namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
 struct MethodInfo
 {
@@ -62,8 +59,4 @@ private:
   MethodInfoResolver method_resolver_;
   std::string method_name_;
 };
-
-} // namespace GrpcHttp1ReverseBridgeTranscoder
-} // namespace HttpFilters
-} // namespace Extensions
-} // namespace Envoy
+} // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder

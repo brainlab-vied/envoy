@@ -1,9 +1,6 @@
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder.h"
 
-namespace Envoy {
-namespace Extensions {
-namespace HttpFilters {
-namespace GrpcHttp1ReverseBridgeTranscoder {
+namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
 Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const std::string& service_name) {
   auto fileOrError = api.fileSystem().fileReadToEnd(proto_descriptor);
@@ -93,8 +90,4 @@ std::pair<absl::Status, std::string> Transcoder::fromJsonBufferToGrpc(Buffer::Ow
     return {absl::InternalError(absl::StrCat("Method does not exist: ", method_name_)), {}};
   }
 }
-
-} // namespace GrpcHttp1ReverseBridgeTranscoder
-} // namespace HttpFilters
-} // namespace Extensions
-} // namespace Envoy 
+} // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder

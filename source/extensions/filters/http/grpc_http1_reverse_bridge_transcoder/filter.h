@@ -12,12 +12,7 @@
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder.h"
 #include "source/common/common/logger.h"
 
-#include "absl/types/optional.h"
-
-namespace Envoy {
-namespace Extensions {
-namespace HttpFilters {
-namespace GrpcHttp1ReverseBridgeTranscoder {
+namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
 // When enabled, will downgrade an incoming gRPC http request into a h/1.1 request.
 class Filter : public Envoy::Http::PassThroughFilter, public Logger::Loggable<Logger::Id::filter> {
@@ -52,8 +47,6 @@ private:
   Buffer::OwnedImpl buffer_{};
 };
 
-using FilterPtr = std::unique_ptr<Filter>;
-
 class FilterConfigPerRoute : public Router::RouteSpecificFilterConfig {
 public:
   FilterConfigPerRoute(const envoy::extensions::filters::http::
@@ -66,8 +59,4 @@ public:
 private:
   bool disabled_;
 };
-
-} // namespace GrpcHttp1ReverseBridgeTranscoder
-} // namespace HttpFilters
-} // namespace Extensions
-} // namespace Envoy
+} // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder
