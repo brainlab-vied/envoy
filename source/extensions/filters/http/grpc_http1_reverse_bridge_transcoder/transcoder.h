@@ -15,34 +15,34 @@
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
-struct MethodInfo
-{
-    const Protobuf::MethodDescriptor* method_desc;
-    const Protobuf::Descriptor* request_desc;
-    const Protobuf::Descriptor* response_desc;
-    google::api::HttpRule http_rule;
+struct MethodInfo {
+  const Protobuf::MethodDescriptor* method_desc;
+  const Protobuf::Descriptor* request_desc;
+  const Protobuf::Descriptor* response_desc;
+  google::api::HttpRule http_rule;
 };
 
 struct MethodInfoResolver {
-    MethodInfoResolver() = default;
+  MethodInfoResolver() = default;
 
-    void emplace(std::string_view name, const MethodInfo& method) {
-        method_info_map_.emplace(name, method);
-    }
+  void emplace(std::string_view name, const MethodInfo& method) {
+    method_info_map_.emplace(name, method);
+  }
 
-    bool contain(const std::string& name) { 
-        return method_info_map_.find(name) != method_info_map_.end(); 
-    }
+  bool contain(const std::string& name) {
+    return method_info_map_.find(name) != method_info_map_.end();
+  }
 
-    const Protobuf::Descriptor* findRequestDescByMethod(const std::string& name) {
-        return method_info_map_.find(name)->second.request_desc;
-    }
+  const Protobuf::Descriptor* findRequestDescByMethod(const std::string& name) {
+    return method_info_map_.find(name)->second.request_desc;
+  }
 
-    const Protobuf::Descriptor* findResponseDescByMethod(const std::string& name) {
-        return method_info_map_.find(name)->second.response_desc;
-    }
+  const Protobuf::Descriptor* findResponseDescByMethod(const std::string& name) {
+    return method_info_map_.find(name)->second.response_desc;
+  }
+
 private:
-    std::unordered_map<std::string, MethodInfo> method_info_map_;
+  std::unordered_map<std::string, MethodInfo> method_info_map_;
 };
 
 class Transcoder : public Logger::Loggable<Logger::Id::filter> {
@@ -52,7 +52,9 @@ public:
   std::pair<absl::Status, std::string> fromGrpcBufferToJson(Buffer::OwnedImpl& buffer);
   std::pair<absl::Status, std::string> fromJsonBufferToGrpc(Buffer::OwnedImpl& buffer);
 
-  void setCurrentMethod(std::string_view name) { method_name_ = name.substr(name.find_last_of('/') + 1); }
+  void setCurrentMethod(std::string_view name) {
+    method_name_ = name.substr(name.find_last_of('/') + 1);
+  }
 
 private:
   Envoy::Protobuf::FileDescriptorSet desc_set_;

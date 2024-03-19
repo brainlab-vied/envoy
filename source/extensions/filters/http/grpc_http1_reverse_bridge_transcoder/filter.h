@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 #include "envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3/config.pb.h"
 #include "envoy/http/filter.h"
@@ -32,7 +33,7 @@ public:
 
 private:
   template <class CallbackType>
-  void respondWithGrpcError(CallbackType& callback_type, const std::string& description);
+  void respondWithGrpcError(CallbackType& callback_type, const std::string_view description);
 
 private:
   Transcoder transcoder_;

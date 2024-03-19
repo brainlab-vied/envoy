@@ -16,11 +16,11 @@ namespace {
 
 // Internal constants
 namespace Errors {
-const std::string HeaderOnly = "HTTP message is header only.";
-const std::string UnexpectedContentType = "HTTP header contains unexpected content type.";
-const std::string GrpcFrameTooSmall = "Received gRPC Frame content if too small.";
-const std::string GrpcToJsonFailed = "Failed to transcode gRPC to JSON.";
-const std::string JsonToGrpcFailed = "Failed to transcode JSON to gRPC.";
+const auto HeaderOnly = "HTTP message is header only.";
+const auto UnexpectedContentType = "HTTP header contains unexpected content type.";
+const auto GrpcFrameTooSmall = "Received gRPC Frame content if too small.";
+const auto GrpcToJsonFailed = "Failed to transcode gRPC to JSON.";
+const auto JsonToGrpcFailed = "Failed to transcode JSON to gRPC.";
 } // namespace Errors
 
 Http::RegisterCustomInlineHeader<Http::CustomInlineHeaderRegistry::Type::RequestHeaders>
@@ -267,7 +267,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 }
 
 template <class CallbackType>
-void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string& description) {
+void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string_view description) {
   // Send a gRPC response indicating an error. Despite propagating an error the
   // underlying HTTP Response is still well formed.
   // Since we are transcoding here, the only gRPC status code that somehow fits is "Unknown".

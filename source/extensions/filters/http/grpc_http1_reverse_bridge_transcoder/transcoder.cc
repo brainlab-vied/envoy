@@ -5,7 +5,8 @@
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
-Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const std::string& service_name) {
+Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor,
+                       const std::string& service_name) {
   auto fileOrError = api.fileSystem().fileReadToEnd(proto_descriptor);
   THROW_IF_STATUS_NOT_OK(fileOrError, throw);
 
@@ -40,11 +41,9 @@ Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const
       http_rule = method_desc->options().GetExtension(google::api::http);
     }
 
-    method_resolver_.emplace(method_desc->name(),
-                             MethodInfo{method_desc,
-                                        method_desc->input_type(),
-                                        method_desc->output_type(),
-                                        http_rule});
+    method_resolver_.emplace(
+        method_desc->name(),
+        MethodInfo{method_desc, method_desc->input_type(), method_desc->output_type(), http_rule});
   }
 }
 
