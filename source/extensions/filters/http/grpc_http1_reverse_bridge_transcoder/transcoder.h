@@ -1,3 +1,6 @@
+// TODO: Add documentation
+// TODO: cleanup
+
 #pragma once
 
 #include "envoy/server/filter_config.h"

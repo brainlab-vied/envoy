@@ -1,3 +1,6 @@
+// TODO: Add documentation
+// TODO: cleanup
+
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder.h"
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
