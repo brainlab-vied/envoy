@@ -1,3 +1,6 @@
+// TODO: Add documentation
+// TODO: cleanup
+
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/config.h"
 
 #include "envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3/config.pb.h"
@@ -6,18 +9,15 @@
 
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/filter.h"
 
-namespace Envoy {
-namespace Extensions {
-namespace HttpFilters {
-namespace GrpcHttp1ReverseBridgeTranscoder {
+namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
 Http::FilterFactoryCb Config::createFilterFactoryFromProtoTyped(
     const envoy::extensions::filters::http::grpc_http1_reverse_bridge_transcoder::v3::FilterConfig&
         config,
     const std::string&, Server::Configuration::FactoryContext& context) {
 
-  auto filter_config =
-      std::make_shared<Filter>(context.getServerFactoryContext().api(), config.proto_descriptor(), config.service());
+  auto filter_config = std::make_shared<Filter>(context.getServerFactoryContext().api(),
+                                                config.proto_descriptor(), config.service());
 
   return [filter_config](Envoy::Http::FilterChainFactoryCallbacks& callbacks) -> void {
     callbacks.addStreamFilter(filter_config);
@@ -31,12 +31,6 @@ Router::RouteSpecificFilterConfigConstSharedPtr Config::createRouteSpecificFilte
   return std::make_shared<FilterConfigPerRoute>(proto_config);
 }
 
-/**
- * Static registration for the grpc http1 reverse bridge filter. @see RegisterFactory.
- */
+/// Static registration for the grpc http1 reverse bridge filter. @see RegisterFactory.
 REGISTER_FACTORY(Config, Server::Configuration::NamedHttpFilterConfigFactory);
-
-} // namespace GrpcHttp1ReverseBridgeTranscoder
-} // namespace HttpFilters
-} // namespace Extensions
-} // namespace Envoy
+} // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder

@@ -1,11 +1,12 @@
+// TODO: Add documentation
+// TODO: cleanup
+
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/transcoder.h"
 
-namespace Envoy {
-namespace Extensions {
-namespace HttpFilters {
-namespace GrpcHttp1ReverseBridgeTranscoder {
+namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
-Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const std::string& service_name) {
+Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor,
+                       const std::string& service_name) {
   auto fileOrError = api.fileSystem().fileReadToEnd(proto_descriptor);
   THROW_IF_STATUS_NOT_OK(fileOrError, throw);
 
@@ -40,11 +41,9 @@ Transcoder::Transcoder(Api::Api& api, const std::string& proto_descriptor, const
       http_rule = method_desc->options().GetExtension(google::api::http);
     }
 
-    method_resolver_.emplace(method_desc->name(),
-                             MethodInfo{method_desc,
-                                        method_desc->input_type(),
-                                        method_desc->output_type(),
-                                        http_rule});
+    method_resolver_.emplace(
+        method_desc->name(),
+        MethodInfo{method_desc, method_desc->input_type(), method_desc->output_type(), http_rule});
   }
 }
 
@@ -93,8 +92,4 @@ std::pair<absl::Status, std::string> Transcoder::fromJsonBufferToGrpc(Buffer::Ow
     return {absl::InternalError(absl::StrCat("Method does not exist: ", method_name_)), {}};
   }
 }
-
-} // namespace GrpcHttp1ReverseBridgeTranscoder
-} // namespace HttpFilters
-} // namespace Extensions
-} // namespace Envoy 
+} // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder
