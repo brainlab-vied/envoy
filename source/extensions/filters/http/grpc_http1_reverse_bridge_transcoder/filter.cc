@@ -70,9 +70,13 @@ void replaceBufferWithGrpcMessage(Buffer::Instance& buffer, std::string& payload
 }
 } // namespace
 
-Filter::Filter(Api::Api& api, std::string proto_descriptor, std::string service_name)
-    : transcoder_{api, std::move(proto_descriptor), std::move(service_name)}, enabled_{false},
-      grpc_status_{}, decoder_buffer_{}, encoder_buffer_{} {}
+Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name)
+    : transcoder_{}, enabled_{false}, grpc_status_{}, decoder_buffer_{}, encoder_buffer_{} {
+
+
+  auto status = transcoder_.init(api, proto_descriptor_path, service_name);
+  assert(status.ok());
+}
 
 /////////////////////////////////////////////////////////////////
 // Implementation Http::StreamDecoderFilter: gRPC -> http/JSON //
@@ -91,19 +95,30 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
         Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(decoder_callbacks_);
 
     if (per_route_config != nullptr && per_route_config->disabled()) {
-      enabled_ = false;
       ENVOY_STREAM_LOG(debug,
-                       "Transcoding is disabled for the route. Request headers is passed through.",
+                       "Transcoding is disabled for the route. Request headers are passed through.",
                        *decoder_callbacks_);
+
+      enabled_ = false;
       return Http::FilterHeadersStatus::Continue;
     }
   }
 
   if (Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
-    enabled_ = true;
-    transcoder_.setCurrentMethod(headers.getPathValue());
+    auto method = static_cast<std::string>(headers.getPathValue());
+    auto status = transcoder_.prepareTranscoding(method);
+
+    if (!status.ok()) {
+      ENVOY_STREAM_LOG(error, "Failed to prepare transcoding. Abort Processing. Error was: {}",
+                       *decoder_callbacks_, status.message());
+
+      // TODO: Add fitting error grpc error
+      respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
+      return Http::FilterHeadersStatus::StopIteration;
+    }
 
     // FIXME: Handle HttpBody
+    enabled_ = true;
     headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
     headers.setInline(accept_handle.handle(), Http::Headers::get().ContentTypeValues.Json);
 
@@ -119,7 +134,6 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
                      "without transcoding.",
                      *decoder_callbacks_);
   }
-
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -149,7 +163,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 
     ENVOY_STREAM_LOG(
         error,
-        "gRPC request data frame to0 few bytes to be a gRPC request. Respond with error "
+        "gRPC request data frame too few bytes to be a gRPC request. Respond with error "
         "and drop buffer.",
         *decoder_callbacks_);
 
@@ -158,7 +172,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   }
   decoder_buffer_.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
 
-  auto [status, json_payload] = transcoder_.fromGrpcBufferToJson(decoder_buffer_);
+  auto status = transcoder_.grpcRequestToJson(decoder_buffer_.toString());
   clearBuffer(decoder_buffer_);
 
   // If transcoding fails: Respond to initial sender with a http message containing an error.
@@ -166,7 +180,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
     ENVOY_STREAM_LOG(error,
                      "Failed to transcode http request from gRPC to JSON. Respond with Error and "
                      "drop buffer. Error was: '{}'",
-                     *decoder_callbacks_, status.message());
+                     *decoder_callbacks_, status.status().message());
 
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcToJsonFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -176,7 +190,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 
   // Replace buffer contents with transcoded JSON string
   clearBuffer(buffer);
-  buffer.add(json_payload);
+  buffer.add(*status);
   return Http::FilterDataStatus::Continue;
 }
 
@@ -241,7 +255,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   }
 
   // From here on the entire data stream is collected and ready for transcoding.
-  auto [status, grpc_payload] = transcoder_.fromJsonBufferToGrpc(encoder_buffer_);
+  auto status = transcoder_.jsonResponseToGrpc(encoder_buffer_.toString());
   clearBuffer(encoder_buffer_);
 
   // If transcoding fails: Respond to initial sender with a http message containing an error.
@@ -249,7 +263,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
     ENVOY_STREAM_LOG(error,
                      "Failed to transcode http response from JSON to gRPC. Respond with Error and "
                      "drop buffer. Error was: '{}'",
-                     *encoder_callbacks_, status.message());
+                     *encoder_callbacks_, status.status().message());
 
     respondWithGrpcError(*encoder_callbacks_, Errors::JsonToGrpcFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -259,7 +273,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
   // Replace buffer contents with transcoded gRPC message and attach http
   // trailer with memorized status code.
-  replaceBufferWithGrpcMessage(buffer, grpc_payload);
+  replaceBufferWithGrpcMessage(buffer, *status);
   auto& trailers = encoder_callbacks_->addEncodedTrailers();
   trailers.setGrpcStatus(grpc_status_);
 
