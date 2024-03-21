@@ -19,7 +19,7 @@ namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 class Filter : public Envoy::Http::PassThroughFilter, public Logger::Loggable<Logger::Id::filter> {
 public:
   // ctor
-  Filter(Api::Api& api, std::string proto_descriptor, std::string service_name);
+  Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name);
 
   // Implementation Http::StreamDecoderFilter: gRPC -> http/Rest
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
