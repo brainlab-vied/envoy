@@ -1,4 +1,3 @@
-// TODO: Add documentation
 // TODO: cleanup
 
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/config.h"
