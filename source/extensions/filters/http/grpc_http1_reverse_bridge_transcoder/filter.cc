@@ -21,6 +21,7 @@ const auto HeaderOnly = "HTTP message is header only.";
 const auto UnexpectedMethodType = "HTTP method type unexpected method type.";
 const auto UnexpectedRequestPath = "HTTP request path is unexpected.";
 const auto UnexpectedContentType = "HTTP header contains unexpected content type.";
+const auto GrpcUnexpectedRequestPath = "gRPC request path is unexpected.";
 const auto GrpcFrameTooSmall = "Received gRPC Frame content if too small.";
 const auto GrpcToJsonFailed = "Failed to transcode gRPC to JSON.";
 const auto JsonToGrpcFailed = "Failed to transcode JSON to gRPC.";
@@ -76,7 +77,7 @@ void replaceBufferWithGrpcMessage(Buffer::Instance& buffer, std::string& payload
 Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name)
     : transcoder_{}, enabled_{false}, grpc_status_{}, decoder_buffer_{}, encoder_buffer_{} {
 
-  auto status = transcoder_.init(api, proto_descriptor_path, service_name);
+  auto const status = transcoder_.init(api, proto_descriptor_path, service_name);
   assert(status.ok());
 }
 
@@ -108,7 +109,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   if (Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
 
     // Configure transcoder to process this request.
-    auto status_method = httpMethodFrom(headers.getMethodValue());
+    auto const status_method = httpMethodFrom(headers.getMethodValue());
     if (!status_method.ok()) {
       ENVOY_LOG(error, "Failed to parse HTTP Method. Abort Processing. Error was: {}",
                 status_method.status().message());
@@ -119,13 +120,12 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
     auto path = static_cast<std::string>(headers.getPathValue());
     auto method_and_path = HttpMethodAndPath{*status_method, std::move(path)};
-    auto status_transcoder = transcoder_.prepareTranscoding(method_and_path);
+    auto const status_transcoder = transcoder_.prepareTranscoding(method_and_path);
     if (!status_transcoder.ok()) {
       ENVOY_LOG(error, "Failed to prepare transcoding. Abort Processing. Error was: {}",
                 status_transcoder.message());
 
-      // TODO: Add fitting error grpc error
-      respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
+      respondWithGrpcError(*decoder_callbacks_, Errors::GrpcUnexpectedRequestPath);
       return Http::FilterHeadersStatus::StopIteration;
     }
 
@@ -138,7 +138,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
       respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedRequestPath);
       return Http::FilterHeadersStatus::StopIteration;
     }
-    headers.setPath(*status_path);
+    headers.setPath(std::move(*status_path));
 
     // FIXME: Handle HttpBody
     // TODO: Refactor me

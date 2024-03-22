@@ -123,9 +123,9 @@ bool Transcoder::Impl::isInitialized() const { return descriptors_ && type_resol
 absl::Status Transcoder::Impl::prepareTranscoding(HttpMethodAndPath method_and_path) {
   assert(isInitialized());
 
-  auto& path = method_and_path.path;
-  auto stripped_path = path.substr(path.find_last_of('/') + 1);
-  auto pos = grpc_method_infos_.find(stripped_path);
+  auto const& path = method_and_path.path;
+  auto const stripped_path = path.substr(path.find_last_of('/') + 1);
+  auto const pos = grpc_method_infos_.find(stripped_path);
 
   if (pos == grpc_method_infos_.cend()) {
     selected_grpc_method_ = nullptr;
@@ -190,10 +190,10 @@ absl::StatusOr<std::string> Transcoder::Impl::grpcRequestToJson(std::string cons
   options.preserve_proto_field_names = true;
   options.always_print_primitive_fields = true;
 
-  auto url = typeUrlFrom(selected_grpc_method_->request_descriptor);
+  auto const url = typeUrlFrom(selected_grpc_method_->request_descriptor);
   ENVOY_LOG(debug, "Attempt transcoding of type url {} to JSON", url);
 
-  auto status = Protobuf::util::BinaryToJsonString(type_resolver_.get(), url, grpc, &json, options);
+  auto const status = Protobuf::util::BinaryToJsonString(type_resolver_.get(), url, grpc, &json, options);
   if (status.ok()) {
     return json;
   }
@@ -212,10 +212,10 @@ absl::StatusOr<std::string> Transcoder::Impl::jsonResponseToGrpc(std::string con
   options.ignore_unknown_fields = false;
   options.case_insensitive_enum_parsing = true;
 
-  auto url = typeUrlFrom(selected_grpc_method_->response_descriptor);
+  auto const url = typeUrlFrom(selected_grpc_method_->response_descriptor);
   ENVOY_LOG(debug, "Attempt transcoding of type url {} to GRPC", url);
 
-  auto status = Protobuf::util::JsonToBinaryString(type_resolver_.get(), url, json, &grpc, options);
+  auto const status = Protobuf::util::JsonToBinaryString(type_resolver_.get(), url, json, &grpc, options);
   if (status.ok()) {
     return grpc;
   }
