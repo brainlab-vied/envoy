@@ -118,7 +118,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
     }
 
     auto path = static_cast<std::string>(headers.getPathValue());
-    auto method_and_path = HttpMethodAndPath{*status_method, path};
+    auto method_and_path = HttpMethodAndPath{*status_method, std::move(path)};
     auto status_transcoder = transcoder_.prepareTranscoding(method_and_path);
     if (!status_transcoder.ok()) {
       ENVOY_LOG(error, "Failed to prepare transcoding. Abort Processing. Error was: {}",

@@ -30,7 +30,7 @@ absl::StatusOr<HttpMethod> httpMethodFrom(std::string_view maybe_http_method);
 std::string httpMethodToString(HttpMethod method);
 
 /**
- * Type typing a http method and a path together
+ * Type tying a http method and a path together
  */
 struct HttpMethodAndPath {
   HttpMethod method;

@@ -52,7 +52,7 @@ private:
   TypeResolverPtr type_resolver_;
   MethodInfoMap grpc_method_infos_;
   MethodInfo const* selected_grpc_method_;
-  HttpMethodAndPath selected_html_method_and_path_;
+  HttpMethodAndPath selected_http_method_and_path_;
 };
 
 absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_descriptor_path,
@@ -134,7 +134,7 @@ absl::Status Transcoder::Impl::prepareTranscoding(HttpMethodAndPath method_and_p
 
   ENVOY_LOG(debug, "Prepared for transcoding method: {}", path);
   selected_grpc_method_ = &(pos->second);
-  selected_html_method_and_path_ = std::move(method_and_path);
+  selected_http_method_and_path_ = std::move(method_and_path);
   return absl::OkStatus();
 }
 
@@ -148,8 +148,8 @@ absl::StatusOr<HttpPath> Transcoder::Impl::getHttpRequestPath() const {
     return absl::FailedPreconditionError("No method to transcode selected. Abort.");
   }
   auto const& http_rule = selected_grpc_method_->http_rule;
-  auto const& http_method = selected_html_method_and_path_.method;
-  auto const& http_path = selected_html_method_and_path_.path;
+  auto const& http_method = selected_http_method_and_path_.method;
+  auto const& http_path = selected_http_method_and_path_.path;
 
   std::string new_http_path;
   switch (http_method) {
