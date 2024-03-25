@@ -1,4 +1,3 @@
-// TODO: Add documentation
 // TODO: cleanup
 
 #pragma once
