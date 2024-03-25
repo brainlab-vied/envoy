@@ -1,4 +1,6 @@
 // TODO: cleanup
+// TODO: Respect configured buffer limits: See grpc_json_transcoder/filter.cc line 438
+// TODO: Take envoy route configuration into account
 
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
@@ -27,10 +29,12 @@ const auto GrpcToJsonFailed = "Failed to transcode gRPC to JSON.";
 const auto JsonToGrpcFailed = "Failed to transcode JSON to gRPC.";
 } // namespace Errors
 
+/*
 Http::RegisterCustomInlineHeader<Http::CustomInlineHeaderRegistry::Type::RequestHeaders>
     accept_handle(Http::CustomHeaders::get().Accept);
+ */
 
-// Refactor me?
+// TODO: Refactor me?
 Grpc::Status::GrpcStatus grpcStatusFromHeaders(Http::ResponseHeaderMap& headers) {
   const auto http_response_status = Http::Utility::getResponseStatus(headers);
 
@@ -43,22 +47,6 @@ Grpc::Status::GrpcStatus grpcStatusFromHeaders(Http::ResponseHeaderMap& headers)
     return Grpc::Utility::httpToGrpcStatus(http_response_status);
   }
 }
-
-/*
-// TODO: Reenable me after adding contentLength header support
-void adjustContentLength(Http::RequestOrResponseHeaderMap& headers,
-                         const std::function<uint64_t(uint64_t value)>& adjustment) {
-  auto length_header = headers.getContentLengthValue();
-  if (!length_header.empty()) {
-    uint64_t length;
-    if (absl::SimpleAtoi(length_header, &length)) {
-      if (length != 0) {
-        headers.setContentLength(adjustment(length));
-      }
-    }
-  }
-}
-*/
 
 void clearBuffer(Buffer::Instance& buffer) { buffer.drain(buffer.length()); }
 
@@ -75,8 +63,8 @@ void replaceBufferWithGrpcMessage(Buffer::Instance& buffer, std::string& payload
 } // namespace
 
 Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name)
-    : transcoder_{}, enabled_{false}, grpc_status_{}, decoder_buffer_{}, encoder_buffer_{} {
-
+    : transcoder_{}, enabled_{false}, grpc_status_{}, decoder_headers_{nullptr}, decoder_body_{},
+      encoder_headers_{nullptr}, encoder_body_{} {
   auto const status = transcoder_.init(api, proto_descriptor_path, service_name);
   assert(status.ok());
 }
@@ -85,76 +73,78 @@ Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string ser
 // Implementation Http::StreamDecoderFilter: gRPC -> http/JSON //
 /////////////////////////////////////////////////////////////////
 Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers, bool end_stream) {
+  enabled_ = false;
+  decoder_headers_ = nullptr;
+
   // Short circuit if header only.
   if (end_stream) {
-    ENVOY_LOG(debug, "Header only request received. Continue.");
+    ENVOY_LOG(debug, "Request is Header only. Request is forwarded.");
     return Http::FilterHeadersStatus::Continue;
   }
 
   // Disable filter per route config if applies
   if (decoder_callbacks_->route() != nullptr) {
-
     const auto* per_route_config =
         Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(decoder_callbacks_);
 
     if (per_route_config != nullptr && per_route_config->disabled()) {
-      ENVOY_LOG(debug,
-                "Transcoding is disabled for the route. Request headers are passed through.");
-
-      enabled_ = false;
+      ENVOY_LOG(debug, "Transcoding is disabled for this route. Request is forwarded.");
       return Http::FilterHeadersStatus::Continue;
     }
   }
 
-  if (Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
-
-    // Configure transcoder to process this request.
-    auto const status_method = httpMethodFrom(headers.getMethodValue());
-    if (!status_method.ok()) {
-      ENVOY_LOG(error, "Failed to parse HTTP Method. Abort Processing. Error was: {}",
-                status_method.status().message());
-
-      respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedMethodType);
-      return Http::FilterHeadersStatus::StopIteration;
-    }
-
-    auto path = static_cast<std::string>(headers.getPathValue());
-    auto method_and_path = HttpMethodAndPath{*status_method, std::move(path)};
-    auto const status_transcoder = transcoder_.prepareTranscoding(method_and_path);
-    if (!status_transcoder.ok()) {
-      ENVOY_LOG(error, "Failed to prepare transcoding. Abort Processing. Error was: {}",
-                status_transcoder.message());
-
-      respondWithGrpcError(*decoder_callbacks_, Errors::GrpcUnexpectedRequestPath);
-      return Http::FilterHeadersStatus::StopIteration;
-    }
-
-    // Rewrite HTTP Headers
-    auto status_path = transcoder_.getHttpRequestPath();
-    if (!status_path.ok()) {
-      ENVOY_LOG(error, "Failed to determine new HTTP Request path. Abort Processing. Error was: {}",
-                status_path.status().message());
-
-      respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedRequestPath);
-      return Http::FilterHeadersStatus::StopIteration;
-    }
-    headers.setPath(std::move(*status_path));
-
-    // FIXME: Handle HttpBody
-    // TODO: Refactor me
-    headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
-    headers.setInline(accept_handle.handle(), Http::Headers::get().ContentTypeValues.Json);
-
-    // TODO: As of yet the content length is okay. It needs to be recalculated after json
-    // transcoding. adjustContentLength(headers, [](auto size) { return size -
-    // Grpc::GRPC_FRAME_HEADER_SIZE; });
-    headers.removeContentLength();
-    decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
-    enabled_ = true;
-  } else {
-    ENVOY_LOG(debug, "Content-type is not application/grpc. Request is passed through "
-                     "without transcoding.");
+  // If this isn't a gRPC request: Pass through
+  if (!Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
+    ENVOY_LOG(debug, "Content-type is not application/grpc. Request is forwarded.");
+    return Http::FilterHeadersStatus::Continue;
   }
+
+  // Configure transcoder to process this request.
+  auto const status_method = httpMethodFrom(headers.getMethodValue());
+  if (!status_method.ok()) {
+    ENVOY_LOG(error, "Failed to parse HTTP Method. Abort Processing. Error was: {}",
+              status_method.status().message());
+
+    respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedMethodType);
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+
+  auto path = static_cast<std::string>(headers.getPathValue());
+  auto method_and_path = HttpMethodAndPath{*status_method, std::move(path)};
+  auto const status_transcoder = transcoder_.prepareTranscoding(method_and_path);
+  if (!status_transcoder.ok()) {
+    ENVOY_LOG(error, "Failed to prepare transcoding. Abort Processing. Error was: {}",
+              status_transcoder.message());
+
+    respondWithGrpcError(*decoder_callbacks_, Errors::GrpcUnexpectedRequestPath);
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+
+  // Rewrite HTTP Headers
+  auto status_path = transcoder_.getHttpRequestPath();
+  if (!status_path.ok()) {
+    ENVOY_LOG(error, "Failed to determine new HTTP Request path. Abort Processing. Error was: {}",
+              status_path.status().message());
+
+    respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedRequestPath);
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+
+  headers.setPath(std::move(*status_path));
+  headers.setEnvoyOriginalPath(headers.getPathValue());
+  headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
+  headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Json);
+
+  // NOTE: Content length handling. Since we don't know the content length
+  // before body transcoding. Memorize a pointer to the header map and use it
+  // in decodeData().
+  decoder_headers_ = &headers;
+
+  // TODO: Figure out what this does???
+  decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
+  enabled_ = true;
+
+  // TODO: Handle HttpBody
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -170,7 +160,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   }
 
   if (buffer.length()) {
-    decoder_buffer_.add(buffer);
+    decoder_body_.add(buffer);
   }
 
   if (!end_stream) {
@@ -179,8 +169,8 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 
   // From here on the entire data stream is collected and ready for transcoding.
   // Strip gRPC Header from buffer and try to transcode buffered data.
-  if (decoder_buffer_.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
-    clearBuffer(decoder_buffer_);
+  if (decoder_body_.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+    clearBuffer(decoder_body_);
 
     ENVOY_LOG(error,
               "gRPC request data frame too few bytes to be a gRPC request. Respond with error "
@@ -189,17 +179,17 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
-  decoder_buffer_.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
+  decoder_body_.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
 
-  auto status = transcoder_.grpcRequestToJson(decoder_buffer_.toString());
-  clearBuffer(decoder_buffer_);
+  auto json_status = transcoder_.grpcRequestToJson(decoder_body_.toString());
+  clearBuffer(decoder_body_);
 
   // If transcoding fails: Respond to initial sender with a http message containing an error.
-  if (!status.ok()) {
+  if (!json_status.ok()) {
     ENVOY_LOG(error,
               "Failed to transcode http request from gRPC to JSON. Respond with Error and "
               "drop buffer. Error was: '{}'",
-              status.status().message());
+              json_status.status().message());
 
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcToJsonFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -209,7 +199,12 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 
   // Replace buffer contents with transcoded JSON string
   clearBuffer(buffer);
-  buffer.add(*status);
+  buffer.add(*json_status);
+
+  // Rewrite headers content length with the size of the buffers contents.
+  decoder_headers_->setContentLength(buffer.length());
+  decoder_headers_ = nullptr;
+
   return Http::FilterDataStatus::Continue;
 }
 
@@ -217,6 +212,8 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 // Implementation Http::StreamEncoderFilter: http/JSON-> gRPC //
 ////////////////////////////////////////////////////////////////
 Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers, bool end_stream) {
+  encoder_headers_ = nullptr;
+
   if (!enabled_) {
     return Http::FilterHeadersStatus::Continue;
   }
@@ -243,10 +240,12 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
   headers.setContentType(Http::Headers::get().ContentTypeValues.Grpc);
   headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Grpc);
 
-  // TODO: Adjust Content Length at a later point (maybe use Trailers for this?)
-  // adjustContentLength(headers, [](auto length) { return length + Grpc::GRPC_FRAME_HEADER_SIZE;
-  // }); headers.setContentLength(16);
-  headers.removeContentLength();
+  // NOTE: Content length handling. Since we don't know the content length
+  // before body transcoding. Memorize a pointer to the header map and use it
+  // in decodeData().
+  encoder_headers_ = &headers;
+
+  // TODO: Do we need this GRPC Status thing?
   grpc_status_ = grpcStatusFromHeaders(headers);
   return Http::FilterHeadersStatus::Continue;
 }
@@ -263,7 +262,7 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   }
 
   if (buffer.length()) {
-    encoder_buffer_.add(buffer);
+    encoder_body_.add(buffer);
   }
 
   if (!end_stream) {
@@ -271,15 +270,15 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   }
 
   // From here on the entire data stream is collected and ready for transcoding.
-  auto status = transcoder_.jsonResponseToGrpc(encoder_buffer_.toString());
-  clearBuffer(encoder_buffer_);
+  auto grpc_status = transcoder_.jsonResponseToGrpc(encoder_body_.toString());
+  clearBuffer(encoder_body_);
 
   // If transcoding fails: Respond to initial sender with a http message containing an error.
-  if (!status.ok()) {
+  if (!grpc_status.ok()) {
     ENVOY_LOG(error,
               "Failed to transcode http response from JSON to gRPC. Respond with Error and "
               "drop buffer. Error was: '{}'",
-              status.status().message());
+              grpc_status.status().message());
 
     respondWithGrpcError(*encoder_callbacks_, Errors::JsonToGrpcFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -287,9 +286,13 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
   ENVOY_LOG(debug, "Transcodeded http response from JSON to gRPC");
 
-  // Replace buffer contents with transcoded gRPC message and attach http
-  // trailer with memorized status code.
-  replaceBufferWithGrpcMessage(buffer, *status);
+  // Replace buffer contents with transcoded gRPC message, set headers content length
+  // and attach http trailer with memorized status code.
+  replaceBufferWithGrpcMessage(buffer, *grpc_status);
+
+  encoder_headers_->setContentLength(buffer.length());
+  encoder_headers_ = nullptr;
+
   auto& trailers = encoder_callbacks_->addEncodedTrailers();
   trailers.setGrpcStatus(grpc_status_);
 
