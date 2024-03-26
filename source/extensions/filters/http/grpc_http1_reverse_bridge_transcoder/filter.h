@@ -37,9 +37,6 @@ private:
 private:
   Transcoder transcoder_;
   bool enabled_;
-
-  // NOTE: Do we actually need the status here???
-  Grpc::Status::GrpcStatus grpc_status_;
   Http::RequestHeaderMap* decoder_headers_;
   Buffer::OwnedImpl decoder_body_;
   Http::ResponseHeaderMap* encoder_headers_;

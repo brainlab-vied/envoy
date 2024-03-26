@@ -29,25 +29,7 @@ const auto GrpcToJsonFailed = "Failed to transcode gRPC to JSON.";
 const auto JsonToGrpcFailed = "Failed to transcode JSON to gRPC.";
 } // namespace Errors
 
-/*
-Http::RegisterCustomInlineHeader<Http::CustomInlineHeaderRegistry::Type::RequestHeaders>
-    accept_handle(Http::CustomHeaders::get().Accept);
- */
-
-// TODO: Refactor me?
-Grpc::Status::GrpcStatus grpcStatusFromHeaders(Http::ResponseHeaderMap& headers) {
-  const auto http_response_status = Http::Utility::getResponseStatus(headers);
-
-  // Notably, we treat an upstream 200 as a successful response. This differs
-  // from the standard but is key in being able to transform a successful
-  // upstream HTTP response into a gRPC response.
-  if (http_response_status == 200) {
-    return Grpc::Status::WellKnownGrpcStatus::Ok;
-  } else {
-    return Grpc::Utility::httpToGrpcStatus(http_response_status);
-  }
-}
-
+// Internal functions
 void clearBuffer(Buffer::Instance& buffer) { buffer.drain(buffer.length()); }
 
 void replaceBufferWithGrpcMessage(Buffer::Instance& buffer, std::string& payload) {
@@ -60,10 +42,22 @@ void replaceBufferWithGrpcMessage(Buffer::Instance& buffer, std::string& payload
   buffer.add(header.data(), header.size());
   buffer.add(payload);
 }
+
+Grpc::Status::GrpcStatus grpcStatusFromHttpStatus(uint64_t http_status) {
+  // For some odd reason, envoys HTTP to gRPC return code conversion does not
+  // support okay results, only the other way around. Add this mapping.
+  static auto const http_status_ok =
+      Grpc::Utility::grpcToHttpStatus(Grpc::Status::WellKnownGrpcStatus::Ok);
+
+  if (http_status != http_status_ok) {
+    return Grpc::Utility::httpToGrpcStatus(http_status);
+  }
+  return Grpc::Status::WellKnownGrpcStatus::Ok;
+}
 } // namespace
 
 Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name)
-    : transcoder_{}, enabled_{false}, grpc_status_{}, decoder_headers_{nullptr}, decoder_body_{},
+    : transcoder_{}, enabled_{false}, decoder_headers_{nullptr}, decoder_body_{},
       encoder_headers_{nullptr}, encoder_body_{} {
   auto const status = transcoder_.init(api, proto_descriptor_path, service_name);
   assert(status.ok());
@@ -244,9 +238,6 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
   // before body transcoding. Memorize a pointer to the header map and use it
   // in decodeData().
   encoder_headers_ = &headers;
-
-  // TODO: Do we need this GRPC Status thing?
-  grpc_status_ = grpcStatusFromHeaders(headers);
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -286,15 +277,16 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
   ENVOY_LOG(debug, "Transcodeded http response from JSON to gRPC");
 
-  // Replace buffer contents with transcoded gRPC message, set headers content length
-  // and attach http trailer with memorized status code.
+  // Replace buffer contents with transcoded gRPC message then update header and trailers
   replaceBufferWithGrpcMessage(buffer, *grpc_status);
+
+  // Elide gRPC response status code from HTTP status code
+  auto& trailers = encoder_callbacks_->addEncodedTrailers();
+  auto const http_status = Http::Utility::getResponseStatus(*encoder_headers_);
+  trailers.setGrpcStatus(grpcStatusFromHttpStatus(http_status));
 
   encoder_headers_->setContentLength(buffer.length());
   encoder_headers_ = nullptr;
-
-  auto& trailers = encoder_callbacks_->addEncodedTrailers();
-  trailers.setGrpcStatus(grpc_status_);
 
   return Http::FilterDataStatus::Continue;
 }
