@@ -37,9 +37,10 @@ private:
 private:
   Transcoder transcoder_;
   bool enabled_;
-  Grpc::Status::GrpcStatus grpc_status_;
-  Buffer::OwnedImpl decoder_buffer_;
-  Buffer::OwnedImpl encoder_buffer_;
+  Http::RequestHeaderMap* decoder_headers_;
+  Buffer::OwnedImpl decoder_body_;
+  Http::ResponseHeaderMap* encoder_headers_;
+  Buffer::OwnedImpl encoder_body_;
 };
 
 class FilterConfigPerRoute : public Router::RouteSpecificFilterConfig {
