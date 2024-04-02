@@ -16,17 +16,18 @@
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 namespace {
-
 // Internal constants
 namespace Errors {
-const auto HeaderOnly = "HTTP message is header only.";
-const auto UnexpectedMethodType = "HTTP method type unexpected method type.";
-const auto UnexpectedRequestPath = "HTTP request path is unexpected.";
-const auto UnexpectedContentType = "HTTP header contains unexpected content type.";
-const auto GrpcUnexpectedRequestPath = "gRPC request path is unexpected.";
-const auto GrpcFrameTooSmall = "Received gRPC Frame content if too small.";
-const auto GrpcToJsonFailed = "Failed to transcode gRPC to JSON.";
-const auto JsonToGrpcFailed = "Failed to transcode JSON to gRPC.";
+// NOTE: Avoid whitespaces in error messages. They trigger an assertion on sending.
+const auto UnexpectedMethodType = "HTTP_method_type_is_unexpected";
+const auto UnexpectedRequestPath = "HTTP_request_path_is_unexpected";
+const auto UnexpectedContentType = "HTTP_header_contains_unexpected_content_type";
+const auto GrpcUnexpectedRequestPath = "gRPC_request_path_is_unexpected";
+const auto GrpcFrameTooSmall = "gRPC_Frame_content_is_too_small";
+const auto GrpcToJsonFailed = "Failed_to_transcode_gRPC_to_JSON";
+const auto JsonToGrpcFailed = "Failed_to_transcode_JSON_to_gRPC";
+const auto ResponseNotOkay = "HTTP_response_status_code_is_not_okay";
+const auto ResponseHeaderOnly = "HTTP_response_is_header_only";
 } // namespace Errors
 
 // Internal functions
@@ -127,8 +128,8 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
     return Http::FilterHeadersStatus::StopIteration;
   }
 
-  headers.setPath(std::move(*status_path));
   headers.setEnvoyOriginalPath(headers.getPathValue());
+  headers.setPath(std::move(*status_path));
   headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
   headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Json);
 
@@ -136,8 +137,6 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   // before body transcoding. Memorize a pointer to the header map and use it
   // in decodeData().
   decoder_headers_ = &headers;
-
-  // TODO: Figure out what this does???
   decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
   enabled_ = true;
 
@@ -169,9 +168,11 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   if (decoder_body_.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
     clearBuffer(decoder_body_);
 
-    ENVOY_STREAM_LOG(error,
-              "gRPC request data frame too few bytes to be a gRPC request. Respond with error "
-              "and drop buffer.", *decoder_callbacks_);
+    ENVOY_STREAM_LOG(
+        error,
+        "gRPC request data frame too few bytes to be a gRPC request. Respond with error "
+        "and drop buffer.",
+        *decoder_callbacks_);
 
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -184,9 +185,9 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   // If transcoding fails: Respond to initial sender with a http message containing an error.
   if (!json_status.ok()) {
     ENVOY_STREAM_LOG(error,
-              "Failed to transcode http request from gRPC to JSON. Respond with Error and "
-              "drop buffer. Error was: '{}'", *decoder_callbacks_,
-              json_status.status().message());
+                     "Failed to transcode http request from gRPC to JSON. Respond with Error and "
+                     "drop buffer. Error was: '{}'",
+                     *decoder_callbacks_, json_status.status().message());
 
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcToJsonFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -215,22 +216,36 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
     return Http::FilterHeadersStatus::Continue;
   }
 
-  // NOTE: Note: Analyze status code. Currently, it is ignored. Send error downstream.
-  // NOTE: This may very well happen in case of errors
-  if (end_stream) {
-    ENVOY_STREAM_LOG(error, "Received HTTP header only response. This must not happen in our use "
-                     "case. Respond with Error.", *encoder_callbacks_);
+  // Map HTTP Status to gRPC status. In case of an error, send a reply to the downstream host.
+  const auto http_status = Http::Utility::getResponseStatus(headers);
+  const auto grpc_status = grpcStatusFromHttpStatus(http_status);
+  if (grpc_status != Grpc::Status::WellKnownGrpcStatus::Ok) {
+    ENVOY_STREAM_LOG(error,
+                     "Response contained HTTP status code {}. Convert error to gRPC"
+                     "status and send it downstream.",
+                     *encoder_callbacks_, http_status);
 
-    respondWithGrpcError(*encoder_callbacks_, Errors::HeaderOnly);
+    respondWithGrpcError(*encoder_callbacks_, Errors::ResponseNotOkay, grpc_status);
+    return Http::FilterHeadersStatus::StopIteration;
+  };
+
+  if (end_stream) {
+    ENVOY_STREAM_LOG(error,
+                     "Received HTTP header only response. This must not happen in our use "
+                     "case. Respond with Error.",
+                     *encoder_callbacks_);
+
+    respondWithGrpcError(*encoder_callbacks_, Errors::ResponseHeaderOnly);
     return Http::FilterHeadersStatus::StopIteration;
   }
 
   // FIXME: When we add transcoding, resonses should be application/json or HttpBody
-
   auto content_type = headers.getContentTypeValue();
   if (content_type != Http::Headers::get().ContentTypeValues.Json) {
-    ENVOY_STREAM_LOG(error, "Received HTTP response not containing JSON payload. Unable to "
-                     "transcode. Respond with Error.", *encoder_callbacks_);
+    ENVOY_STREAM_LOG(error,
+                     "Received HTTP response not containing JSON payload. Unable to "
+                     "transcode. Respond with Error.",
+                     *encoder_callbacks_);
 
     respondWithGrpcError(*encoder_callbacks_, Errors::UnexpectedContentType);
   }
@@ -272,9 +287,9 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   // If transcoding fails: Respond to initial sender with a http message containing an error.
   if (!grpc_status.ok()) {
     ENVOY_STREAM_LOG(error,
-              "Failed to transcode http response from JSON to gRPC. Respond with Error and "
-              "drop buffer. Error was: '{}'", *encoder_callbacks_,
-              grpc_status.status().message());
+                     "Failed to transcode http response from JSON to gRPC. Respond with Error and "
+                     "drop buffer. Error was: '{}'",
+                     *encoder_callbacks_, grpc_status.status().message());
 
     respondWithGrpcError(*encoder_callbacks_, Errors::JsonToGrpcFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
@@ -297,12 +312,16 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 }
 
 template <class CallbackType>
-void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string_view description) {
+void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string_view description,
+                                  Grpc::Status::GrpcStatus grpcStatus) {
   // Send a gRPC response indicating an error. Despite propagating an error the
   // underlying HTTP Response is still well formed.
   // Since we are transcoding here, the only gRPC status code that somehow fits is "Unknown".
-  callback_type.sendLocalReply(Http::Code::OK,
-                               "envoy reverse bridge: gRPC <-> http/JSON transcoding failed.",
-                               nullptr, Grpc::Status::WellKnownGrpcStatus::Unknown, description);
+  callback_type.sendLocalReply(Http::Code::OK, description, nullptr, grpcStatus, description);
+}
+
+template <class CallbackType>
+void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string_view description) {
+  respondWithGrpcError(callback_type, description, Grpc::Status::WellKnownGrpcStatus::Unknown);
 }
 } // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder
