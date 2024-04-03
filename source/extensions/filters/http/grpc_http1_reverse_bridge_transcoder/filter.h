@@ -34,6 +34,10 @@ private:
   template <class CallbackType>
   void respondWithGrpcError(CallbackType& callback_type, const std::string_view description);
 
+  template <class CallbackType>
+  void respondWithGrpcError(CallbackType& callback_type, const std::string_view description,
+                            Grpc::Status::GrpcStatus grpc_status);
+
 private:
   Transcoder transcoder_;
   bool enabled_;
