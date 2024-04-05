@@ -1,9 +1,10 @@
-// TODO: cleanup
-
 #pragma once
 
+#include <absl/status/statusor.h>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <unordered_map>
 
 #include "envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3/config.pb.h"
 #include "envoy/http/filter.h"
@@ -16,6 +17,18 @@
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
 class Filter : public Envoy::Http::PassThroughFilter, public Logger::Loggable<Logger::Id::filter> {
+private:
+  using SessionId = uint64_t;
+  struct Session {
+    SessionId id;
+    HttpMethodAndPath method_and_path;
+    Http::RequestHeaderMap* decoder_headers;
+    Buffer::OwnedImpl decoder_data;
+    Http::ResponseHeaderMap* encoder_headers;
+    Buffer::OwnedImpl encoder_data;
+  };
+  using Sessions = std::unordered_map<SessionId, Session>;
+
 public:
   // ctor
   Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name);
@@ -31,6 +44,12 @@ public:
   Http::FilterDataStatus encodeData(Buffer::Instance& buffer, bool end_stream) override;
 
 private:
+  // Session handling functions return pointers on purpose. The absl::StatusOr
+  // template causes compilation errors then used with references as arguments.
+  absl::StatusOr<Session* const> createSession(SessionId sid);
+  absl::StatusOr<Session* const> lookupSession(SessionId sid);
+  void destroySession(Session* const session);
+
   template <class CallbackType>
   void respondWithGrpcError(CallbackType& callback_type, const std::string_view description);
 
@@ -40,11 +59,7 @@ private:
 
 private:
   Transcoder transcoder_;
-  bool enabled_;
-  Http::RequestHeaderMap* decoder_headers_;
-  Buffer::OwnedImpl decoder_body_;
-  Http::ResponseHeaderMap* encoder_headers_;
-  Buffer::OwnedImpl encoder_body_;
+  Sessions grpc_sessions_;
 };
 
 class FilterConfigPerRoute : public Router::RouteSpecificFilterConfig {
