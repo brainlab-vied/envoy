@@ -1,6 +1,3 @@
-// TODO: Cleanup Task: Respect configured buffer limits: See grpc_json_transcoder/filter.cc line 438
-// TODO: Cleanup Task: Figure out if there is a way to access headers safer than raw pointers.
-// TODO: Cleanup Task: Figure out if there is a way to handle the internal databuffers better.
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
 
@@ -27,6 +24,7 @@ const auto GrpcToJsonFailed = "Failed_to_transcode_gRPC_to_JSON";
 const auto JsonToGrpcFailed = "Failed_to_transcode_JSON_to_gRPC";
 const auto ResponseNotOkay = "HTTP_response_status_code_is_not_okay";
 const auto ResponseHeaderOnly = "HTTP_response_is_header_only";
+const auto BufferExceedsLimitError = "Buffered_data_exceeds_configured_limit";
 const auto InternalError = "Internal_Error_in_Plugin_occurred";
 } // namespace Errors
 
@@ -190,6 +188,16 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
     session->decoder_data.add(buffer);
   }
 
+  if (decoder_callbacks_->decoderBufferLimit() < session->decoder_data.length()) {
+    ENVOY_STREAM_LOG(error,
+                     "Buffered data exceed configured buffer limits. Destroy session and "
+                     "send gRPC error message downstream.",
+                     *decoder_callbacks_);
+
+    respondWithGrpcError(*decoder_callbacks_, Errors::BufferExceedsLimitError);
+    return Http::FilterDataStatus::StopIterationNoBuffer;
+  }
+
   if (!end_stream) {
     ENVOY_STREAM_LOG(debug, "End of stream is not reached. Return and wait for more data.",
                      *decoder_callbacks_);
@@ -333,6 +341,16 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
     ENVOY_STREAM_LOG(debug, "Add {} bytes to encoder buffer.", *encoder_callbacks_,
                      buffer.length());
     session->encoder_data.add(buffer);
+  }
+
+  if (encoder_callbacks_->encoderBufferLimit() < session->encoder_data.length()) {
+    ENVOY_STREAM_LOG(error,
+                     "Buffered data exceed configured buffer limits. Destroy session and "
+                     "send gRPC error message downstream.",
+                     *encoder_callbacks_);
+
+    respondWithGrpcError(*encoder_callbacks_, Errors::BufferExceedsLimitError);
+    return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
   if (!end_stream) {
