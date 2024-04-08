@@ -1,7 +1,8 @@
-// TODO: cleanup
-// TODO: Respect configured buffer limits: See grpc_json_transcoder/filter.cc line 438
-// TODO: Take envoy route configuration into account
-
+// TODO: Cleanup Task: Respect configured buffer limits: See grpc_json_transcoder/filter.cc line 438
+// TODO: Cleanup Task: Drop sessions that never got an response. Maybe 
+//                     there is some event before a stream is removed.
+// TODO: Cleanup Task: Figure out if there is a way to access headers safer than raw pointers.
+// TODO: Cleanup Task: Figure out if there is a way to handle the internal databuffers better.
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
 
@@ -28,6 +29,7 @@ const auto GrpcToJsonFailed = "Failed_to_transcode_gRPC_to_JSON";
 const auto JsonToGrpcFailed = "Failed_to_transcode_JSON_to_gRPC";
 const auto ResponseNotOkay = "HTTP_response_status_code_is_not_okay";
 const auto ResponseHeaderOnly = "HTTP_response_is_header_only";
+const auto InternalError = "Internal_Error_in_Plugin_occurred";
 } // namespace Errors
 
 // Internal functions
@@ -58,8 +60,7 @@ Grpc::Status::GrpcStatus grpcStatusFromHttpStatus(uint64_t http_status) {
 } // namespace
 
 Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name)
-    : transcoder_{}, enabled_{false}, decoder_headers_{nullptr}, decoder_body_{},
-      encoder_headers_{nullptr}, encoder_body_{} {
+    : transcoder_{}, grpc_sessions_{} {
   auto const status = transcoder_.init(api, proto_descriptor_path, service_name);
   assert(status.ok());
 }
@@ -68,79 +69,104 @@ Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string ser
 // Implementation Http::StreamDecoderFilter: gRPC -> http/JSON //
 /////////////////////////////////////////////////////////////////
 Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers, bool end_stream) {
-  enabled_ = false;
-  decoder_headers_ = nullptr;
-
+  // Try to create new session. Respond with an error message is this fails.
   // Short circuit if header only.
   if (end_stream) {
-    ENVOY_STREAM_LOG(debug, "Request is Header only. Request is forwarded.", *decoder_callbacks_);
+    ENVOY_STREAM_LOG(debug,
+                     "Header only request received. This cannot be a gRPC Request. Forward "
+                     "request headers unmodified.",
+                     *decoder_callbacks_);
+
     return Http::FilterHeadersStatus::Continue;
   }
 
-  // Disable filter per route config if applies
+  // Disable Transcoding if disable for this Route
   if (decoder_callbacks_->route() != nullptr) {
     const auto* per_route_config =
         Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(decoder_callbacks_);
 
     if (per_route_config != nullptr && per_route_config->disabled()) {
-      ENVOY_STREAM_LOG(debug, "Transcoding is disabled for this route. Request is forwarded.",
-                       *decoder_callbacks_);
+      ENVOY_STREAM_LOG(
+          debug, "Transcoding is disabled for this route. Forwarded request headers unmodified.",
+          *decoder_callbacks_);
       return Http::FilterHeadersStatus::Continue;
     }
   }
 
   // If this isn't a gRPC request: Pass through
   if (!Envoy::Grpc::Common::isGrpcRequestHeaders(headers)) {
-    ENVOY_STREAM_LOG(debug, "Content-type is not application/grpc. Request is forwarded.",
+    ENVOY_STREAM_LOG(debug,
+                     "Requests content-type header value is not 'application/grpc'. Forward "
+                     "request headers unmodified.",
                      *decoder_callbacks_);
     return Http::FilterHeadersStatus::Continue;
   }
 
-  // Configure transcoder to process this request.
-  auto const status_method = httpMethodFrom(headers.getMethodValue());
-  if (!status_method.ok()) {
-    ENVOY_STREAM_LOG(error, "Failed to parse HTTP Method. Abort Processing. Error was: {}",
-                     *decoder_callbacks_, status_method.status().message());
+  // From here on, this Request must be transcoded. Create session.
+  auto session_status = createSession(decoder_callbacks_->streamId());
+  if (!session_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Unable to create session. Send gRPC error message downstream. Error was: {}",
+                     *decoder_callbacks_, session_status.status().message());
 
+    respondWithGrpcError(*decoder_callbacks_, Errors::InternalError);
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+  auto* const session = *session_status;
+
+  auto const method_status = httpMethodFrom(headers.getMethodValue());
+  if (!method_status.ok()) {
+    ENVOY_STREAM_LOG(
+        error,
+        "Failed to construct HTTP Method from header method value. Destroy session and "
+        "send gRPC error message downstream. Error was: {}",
+        *decoder_callbacks_, method_status.status().message());
+
+    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedMethodType);
     return Http::FilterHeadersStatus::StopIteration;
   }
-
   auto path = static_cast<std::string>(headers.getPathValue());
-  auto method_and_path = HttpMethodAndPath{*status_method, std::move(path)};
-  auto const status_transcoder = transcoder_.prepareTranscoding(method_and_path);
-  if (!status_transcoder.ok()) {
-    ENVOY_STREAM_LOG(error, "Failed to prepare transcoding. Abort Processing. Error was: {}",
-                     *decoder_callbacks_, status_transcoder.message());
+  session->method_and_path = HttpMethodAndPath{*method_status, std::move(path)};
 
+  auto const transcoder_status = transcoder_.prepareTranscoding(session->method_and_path);
+  if (!transcoder_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to prepare Transcoder from HTTP Method and Path. Destroy session and "
+                     "send gRPC error message downstream. Error was: {}",
+                     *decoder_callbacks_, transcoder_status.message());
+
+    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcUnexpectedRequestPath);
     return Http::FilterHeadersStatus::StopIteration;
   }
 
   // Rewrite HTTP Headers
-  auto status_path = transcoder_.getHttpRequestPath();
-  if (!status_path.ok()) {
+  auto path_status = transcoder_.getHttpRequestPath();
+  if (!path_status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "Failed to determine new HTTP Request path. Abort Processing. Error was: {}",
-                     *decoder_callbacks_, status_path.status().message());
+                     "Transcoder failed to determine new HTTP Request path. Destroy session and "
+                     "send gRPC error message downstream. Error was: {}",
+                     *decoder_callbacks_, path_status.status().message());
 
+    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedRequestPath);
     return Http::FilterHeadersStatus::StopIteration;
   }
 
   headers.setEnvoyOriginalPath(headers.getPathValue());
-  headers.setPath(std::move(*status_path));
+  headers.setPath(std::move(*path_status));
   headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
   headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Json);
+  headers.removeTE();
 
   // NOTE: Content length handling. Since we don't know the content length
   // before body transcoding. Memorize a pointer to the header map and use it
   // in decodeData().
-  decoder_headers_ = &headers;
+  session->decoder_headers = &headers;
   decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
-  enabled_ = true;
 
-  // TODO: Handle HttpBody
+  // TODO: Handle HttpBody Messages
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -151,44 +177,65 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   // in our own internal buffer and convert the entire buffer at the end of the stream to pass the
   // result further. To achieve this the return code "StopIterationNoBuffer" disables the internal
   // buffering and "Continue" is used to pass on the contents "buffer".
-  if (!enabled_) {
+  auto session_status = lookupSession(decoder_callbacks_->streamId());
+  if (!session_status.ok()) {
+    ENVOY_STREAM_LOG(debug,
+                     "No gRPC Session found for this stream. Forwarded request data unmodified.",
+                     *decoder_callbacks_);
     return Http::FilterDataStatus::Continue;
   }
+  auto* const session = *session_status;
 
   if (buffer.length()) {
-    decoder_body_.add(buffer);
+    ENVOY_STREAM_LOG(debug, "Add {} bytes to decoder buffer.", *decoder_callbacks_,
+                     buffer.length());
+    session->decoder_data.add(buffer);
   }
 
   if (!end_stream) {
+    ENVOY_STREAM_LOG(debug, "End of stream is not reached. Return and wait for more data.",
+                     *decoder_callbacks_);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
   // From here on the entire data stream is collected and ready for transcoding.
   // Strip gRPC Header from buffer and try to transcode buffered data.
-  if (decoder_body_.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
-    clearBuffer(decoder_body_);
+  if (session->decoder_data.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+    ENVOY_STREAM_LOG(error,
+                     "gRPC request data frame contains too few bytes to be a gRPC request. Destroy "
+                     "Session and send gRPC error message downstream.",
+                     *decoder_callbacks_);
 
-    ENVOY_STREAM_LOG(
-        error,
-        "gRPC request data frame too few bytes to be a gRPC request. Respond with error "
-        "and drop buffer.",
-        *decoder_callbacks_);
-
+    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
-  decoder_body_.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
+  session->decoder_data.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
 
-  auto json_status = transcoder_.grpcRequestToJson(decoder_body_.toString());
-  clearBuffer(decoder_body_);
+  // From here on the entire data stream is collected and ready for transcoding, prepare it.
+  auto const transcoder_status = transcoder_.prepareTranscoding(session->method_and_path);
+  if (!transcoder_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to prepare Transcoder from HTTP Method and Path. Destroy session and "
+                     "send gRPC error message downstream. Error was: {}",
+                     *decoder_callbacks_, transcoder_status.message());
+
+    destroySession(session);
+    respondWithGrpcError(*decoder_callbacks_, Errors::InternalError);
+    return Http::FilterDataStatus::StopIterationNoBuffer;
+  }
+
+  auto json_status = transcoder_.grpcRequestToJson(session->decoder_data.toString());
+  clearBuffer(session->decoder_data);
 
   // If transcoding fails: Respond to initial sender with a http message containing an error.
   if (!json_status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "Failed to transcode http request from gRPC to JSON. Respond with Error and "
-                     "drop buffer. Error was: '{}'",
+                     "Failed to transcode http request from gRPC to JSON. Destroy session and gRPC "
+                     "error message downstream. Error was: '{}'",
                      *decoder_callbacks_, json_status.status().message());
 
+    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcToJsonFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -200,9 +247,7 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   buffer.add(*json_status);
 
   // Rewrite headers content length with the size of the buffers contents.
-  decoder_headers_->setContentLength(buffer.length());
-  decoder_headers_ = nullptr;
-
+  session->decoder_headers->setContentLength(buffer.length());
   return Http::FilterDataStatus::Continue;
 }
 
@@ -210,54 +255,61 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 // Implementation Http::StreamEncoderFilter: http/JSON-> gRPC //
 ////////////////////////////////////////////////////////////////
 Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers, bool end_stream) {
-  encoder_headers_ = nullptr;
-
-  if (!enabled_) {
+  auto session_status = lookupSession(encoder_callbacks_->streamId());
+  if (!session_status.ok()) {
+    ENVOY_STREAM_LOG(
+        debug, "No gRPC Session found for this stream. Forwarded response headers unmodified.",
+        *decoder_callbacks_);
     return Http::FilterHeadersStatus::Continue;
   }
+  auto* const session = *session_status;
 
   // Map HTTP Status to gRPC status. In case of an error, send a reply to the downstream host.
   const auto http_status = Http::Utility::getResponseStatus(headers);
   const auto grpc_status = grpcStatusFromHttpStatus(http_status);
   if (grpc_status != Grpc::Status::WellKnownGrpcStatus::Ok) {
     ENVOY_STREAM_LOG(error,
-                     "Response contained HTTP status code {}. Convert error to gRPC"
-                     "status and send it downstream.",
+                     "Response contained HTTP status code {}. Destroy session and send gRPC error "
+                     "message with converted status code downstream.",
                      *encoder_callbacks_, http_status);
 
+    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::ResponseNotOkay, grpc_status);
     return Http::FilterHeadersStatus::StopIteration;
   };
 
   if (end_stream) {
     ENVOY_STREAM_LOG(error,
-                     "Received HTTP header only response. This must not happen in our use "
-                     "case. Respond with Error.",
+                     "Received HTTP header only response. This is unexpected for HTTP/JSON "
+                     "responses. Destroy session and send gRPC error downstream.",
                      *encoder_callbacks_);
 
+    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::ResponseHeaderOnly);
     return Http::FilterHeadersStatus::StopIteration;
   }
 
-  // FIXME: When we add transcoding, resonses should be application/json or HttpBody
+  // TODO: Add support HttpBody Messages
   auto content_type = headers.getContentTypeValue();
   if (content_type != Http::Headers::get().ContentTypeValues.Json) {
     ENVOY_STREAM_LOG(error,
-                     "Received HTTP response not containing JSON payload. Unable to "
-                     "transcode. Respond with Error.",
+                     "Received HTTP response does not containing JSON payload. Content type is "
+                     "unsupported. Destroy session and send gRPC error downstream.",
                      *encoder_callbacks_);
 
+    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::UnexpectedContentType);
+    return Http::FilterHeadersStatus::StopIteration;
   }
 
-  // FIXME: When we add transcoding, resonses should be application/grpc or HttpBody
+  // Modify Headers and proceed.
   headers.setContentType(Http::Headers::get().ContentTypeValues.Grpc);
   headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Grpc);
 
   // NOTE: Content length handling. Since we don't know the content length
   // before body transcoding. Memorize a pointer to the header map and use it
   // in decodeData().
-  encoder_headers_ = &headers;
+  session->encoder_headers = &headers;
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -268,29 +320,48 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   // in our own internal buffer and convert the entire buffer at the end of the stream to pass the
   // result further. To achieve this the return code "StopIterationNoBuffer" disables the internal
   // buffering and "Continue" is used to pass on the contents "buffer".
-  if (!enabled_) {
+  auto session_status = lookupSession(encoder_callbacks_->streamId());
+  if (!session_status.ok()) {
+    ENVOY_STREAM_LOG(debug,
+                     "No gRPC Session found for this stream. Forwarded response data unmodified.",
+                     *decoder_callbacks_);
     return Http::FilterDataStatus::Continue;
   }
+  auto* const session = *session_status;
 
   if (buffer.length()) {
-    encoder_body_.add(buffer);
+    ENVOY_STREAM_LOG(debug, "Add {} bytes to encoder buffer.", *encoder_callbacks_,
+                     buffer.length());
+    session->encoder_data.add(buffer);
   }
 
   if (!end_stream) {
+    ENVOY_STREAM_LOG(debug, "End of stream is not reached. Return and wait for more data.",
+                     *encoder_callbacks_);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
-  // From here on the entire data stream is collected and ready for transcoding.
-  auto grpc_status = transcoder_.jsonResponseToGrpc(encoder_body_.toString());
-  clearBuffer(encoder_body_);
+  // From here on the entire data stream is collected and ready for transcoding, prepare it.
+  auto const transcoder_status = transcoder_.prepareTranscoding(session->method_and_path);
+  if (!transcoder_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to prepare Transcoder from HTTP Method and Path. Destroy session and "
+                     "send gRPC error message downstream. Error was: {}",
+                     *encoder_callbacks_, transcoder_status.message());
 
-  // If transcoding fails: Respond to initial sender with a http message containing an error.
+    destroySession(session);
+    respondWithGrpcError(*encoder_callbacks_, Errors::InternalError);
+    return Http::FilterDataStatus::StopIterationNoBuffer;
+  }
+
+  auto grpc_status = transcoder_.jsonResponseToGrpc(session->encoder_data.toString());
   if (!grpc_status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "Failed to transcode http response from JSON to gRPC. Respond with Error and "
-                     "drop buffer. Error was: '{}'",
+                     "Failed to transcode http response from JSON to gRPC. Destroy session and "
+                     "send gRPC error message downstream. Error was: '{}'",
                      *encoder_callbacks_, grpc_status.status().message());
 
+    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::JsonToGrpcFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -302,14 +373,41 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
 
   // Elide gRPC response status code from HTTP status code
   auto& trailers = encoder_callbacks_->addEncodedTrailers();
-  auto const http_status = Http::Utility::getResponseStatus(*encoder_headers_);
+  auto const http_status = Http::Utility::getResponseStatus(*(session->encoder_headers));
   trailers.setGrpcStatus(grpcStatusFromHttpStatus(http_status));
+  session->encoder_headers->setContentLength(buffer.length());
 
-  encoder_headers_->setContentLength(buffer.length());
-  encoder_headers_ = nullptr;
-
+  ENVOY_STREAM_LOG(debug, "Processed Session successfully. Destroy session.", *encoder_callbacks_);
+  destroySession(session);
   return Http::FilterDataStatus::Continue;
 }
+
+absl::StatusOr<Filter::Session* const> Filter::createSession(SessionId sid) {
+  auto [pos, ok] = grpc_sessions_.insert({sid, Session{}});
+  if (!ok) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Session with sid ", sid, " already exists."));
+  }
+
+  // Initialize session after successful insertion.
+  auto* const session = &(pos->second);
+  session->id = sid;
+  session->decoder_headers = nullptr;
+  session->decoder_data = Buffer::OwnedImpl();
+  session->encoder_headers = nullptr;
+  session->encoder_data = Buffer::OwnedImpl();
+  return session;
+}
+
+absl::StatusOr<Filter::Session* const> Filter::lookupSession(SessionId sid) {
+  auto pos = grpc_sessions_.find(sid);
+  if (pos == grpc_sessions_.cend()) {
+    return absl::NotFoundError(absl::StrCat("Failed to lookup session with id ", sid));
+  }
+  return &(pos->second);
+}
+
+void Filter::destroySession(Session* const session) { grpc_sessions_.erase(session->id); }
 
 template <class CallbackType>
 void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string_view description,
