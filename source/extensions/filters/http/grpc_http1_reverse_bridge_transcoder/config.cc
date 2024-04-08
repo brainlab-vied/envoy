@@ -1,11 +1,7 @@
-// TODO: cleanup
-
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/config.h"
-
 #include "envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3/config.pb.h"
 #include "envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3/config.pb.validate.h"
 #include "envoy/registry/registry.h"
-
 #include "source/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/filter.h"
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {

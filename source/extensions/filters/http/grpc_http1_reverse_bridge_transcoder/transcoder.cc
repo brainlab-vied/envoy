@@ -193,7 +193,8 @@ absl::StatusOr<std::string> Transcoder::Impl::grpcRequestToJson(std::string cons
   auto const url = typeUrlFrom(selected_grpc_method_->request_descriptor);
   ENVOY_LOG(debug, "Attempt transcoding of type url {} to JSON", url);
 
-  auto const status = Protobuf::util::BinaryToJsonString(type_resolver_.get(), url, grpc, &json, options);
+  auto const status =
+      Protobuf::util::BinaryToJsonString(type_resolver_.get(), url, grpc, &json, options);
   if (status.ok()) {
     return json;
   }
@@ -215,7 +216,8 @@ absl::StatusOr<std::string> Transcoder::Impl::jsonResponseToGrpc(std::string con
   auto const url = typeUrlFrom(selected_grpc_method_->response_descriptor);
   ENVOY_LOG(debug, "Attempt transcoding of type url {} to GRPC", url);
 
-  auto const status = Protobuf::util::JsonToBinaryString(type_resolver_.get(), url, json, &grpc, options);
+  auto const status =
+      Protobuf::util::JsonToBinaryString(type_resolver_.get(), url, json, &grpc, options);
   if (status.ok()) {
     return grpc;
   }
