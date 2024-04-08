@@ -62,7 +62,6 @@ public:
    */
   absl::StatusOr<Session* const> createSession(SessionId sid);
 
-
   /**
    * Lookup an existing session.
    * @params[in] sid session id of the connection to find.
@@ -73,7 +72,7 @@ public:
 
   /**
    * Prevents deletion of accessed sessions (created or lookup) on
-   * destructor execution. Call this if you want to keep the session 
+   * destructor execution. Call this if you want to keep the session
    * alive beyond the scope of a method.
    */
   void keepAccessedSessionsAlive();
