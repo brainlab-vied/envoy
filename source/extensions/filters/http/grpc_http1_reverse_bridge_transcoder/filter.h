@@ -45,8 +45,8 @@ private:
 class FilterConfigPerRoute : public Router::RouteSpecificFilterConfig {
 public:
   FilterConfigPerRoute(const envoy::extensions::filters::http::
-                           grpc_http1_reverse_bridge_transcoder::v3::FilterConfigPerRoute&) {}
-
+                           grpc_http1_reverse_bridge_transcoder::v3::FilterConfigPerRoute& config)
+      : disabled_(config.disabled()) {}
   bool disabled() const { return disabled_; }
 
 private:
