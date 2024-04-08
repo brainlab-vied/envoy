@@ -1,7 +1,7 @@
 #pragma once
 
 #include <string_view>
-#include <absl/status/statusor.h>
+#include "absl/status/statusor.h"
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
