@@ -45,7 +45,7 @@ public:
    * @brief Get HTTP request path.
    * @returns Returns the updated HTTP path to use with the transcoded HTTP request.
    *          In case the path was not annotated in the protobuf descriptor, the
-   *          current path is returned. The Method fails in case 
+   *          current path is returned. The Method fails in case
    *          "prepareTranscoding" was not called before.
    */
   absl::StatusOr<HttpPath> getHttpRequestPath() const;

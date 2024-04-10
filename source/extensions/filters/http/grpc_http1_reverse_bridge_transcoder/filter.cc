@@ -1,8 +1,3 @@
-// TODO: Cleanup Task: Respect configured buffer limits: See grpc_json_transcoder/filter.cc line 438
-// TODO: Cleanup Task: Drop sessions that never got an response. Maybe 
-//                     there is some event before a stream is removed.
-// TODO: Cleanup Task: Figure out if there is a way to access headers safer than raw pointers.
-// TODO: Cleanup Task: Figure out if there is a way to handle the internal databuffers better.
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
 
@@ -29,6 +24,7 @@ const auto GrpcToJsonFailed = "Failed_to_transcode_gRPC_to_JSON";
 const auto JsonToGrpcFailed = "Failed_to_transcode_JSON_to_gRPC";
 const auto ResponseNotOkay = "HTTP_response_status_code_is_not_okay";
 const auto ResponseHeaderOnly = "HTTP_response_is_header_only";
+const auto BufferExceedsLimitError = "Buffered_data_exceeds_configured_limit";
 const auto InternalError = "Internal_Error_in_Plugin_occurred";
 } // namespace Errors
 
@@ -103,7 +99,8 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   }
 
   // From here on, this Request must be transcoded. Create session.
-  auto session_status = createSession(decoder_callbacks_->streamId());
+  auto session_guard = SessionGuard(grpc_sessions_);
+  auto session_status = session_guard.createSession(decoder_callbacks_->streamId());
   if (!session_status.ok()) {
     ENVOY_STREAM_LOG(error,
                      "Unable to create session. Send gRPC error message downstream. Error was: {}",
@@ -122,7 +119,6 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
         "send gRPC error message downstream. Error was: {}",
         *decoder_callbacks_, method_status.status().message());
 
-    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedMethodType);
     return Http::FilterHeadersStatus::StopIteration;
   }
@@ -136,7 +132,6 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
                      "send gRPC error message downstream. Error was: {}",
                      *decoder_callbacks_, transcoder_status.message());
 
-    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcUnexpectedRequestPath);
     return Http::FilterHeadersStatus::StopIteration;
   }
@@ -149,7 +144,6 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
                      "send gRPC error message downstream. Error was: {}",
                      *decoder_callbacks_, path_status.status().message());
 
-    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::UnexpectedRequestPath);
     return Http::FilterHeadersStatus::StopIteration;
   }
@@ -167,6 +161,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
 
   // TODO: Handle HttpBody Messages
+  session_guard.keepAccessedSessionsAlive();
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -177,7 +172,8 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   // in our own internal buffer and convert the entire buffer at the end of the stream to pass the
   // result further. To achieve this the return code "StopIterationNoBuffer" disables the internal
   // buffering and "Continue" is used to pass on the contents "buffer".
-  auto session_status = lookupSession(decoder_callbacks_->streamId());
+  auto session_guard = SessionGuard(grpc_sessions_);
+  auto session_status = session_guard.lookupSession(decoder_callbacks_->streamId());
   if (!session_status.ok()) {
     ENVOY_STREAM_LOG(debug,
                      "No gRPC Session found for this stream. Forwarded request data unmodified.",
@@ -192,9 +188,21 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
     session->decoder_data.add(buffer);
   }
 
+  if (decoder_callbacks_->decoderBufferLimit() < session->decoder_data.length()) {
+    ENVOY_STREAM_LOG(error,
+                     "Buffered data exceed configured buffer limits. Destroy session and "
+                     "send gRPC error message downstream.",
+                     *decoder_callbacks_);
+
+    respondWithGrpcError(*decoder_callbacks_, Errors::BufferExceedsLimitError);
+    return Http::FilterDataStatus::StopIterationNoBuffer;
+  }
+
   if (!end_stream) {
     ENVOY_STREAM_LOG(debug, "End of stream is not reached. Return and wait for more data.",
                      *decoder_callbacks_);
+
+    session_guard.keepAccessedSessionsAlive();
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
@@ -206,7 +214,6 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
                      "Session and send gRPC error message downstream.",
                      *decoder_callbacks_);
 
-    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -220,7 +227,6 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
                      "send gRPC error message downstream. Error was: {}",
                      *decoder_callbacks_, transcoder_status.message());
 
-    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::InternalError);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -235,7 +241,6 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
                      "error message downstream. Error was: '{}'",
                      *decoder_callbacks_, json_status.status().message());
 
-    destroySession(session);
     respondWithGrpcError(*decoder_callbacks_, Errors::GrpcToJsonFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -248,6 +253,8 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 
   // Rewrite headers content length with the size of the buffers contents.
   session->decoder_headers->setContentLength(buffer.length());
+
+  session_guard.keepAccessedSessionsAlive();
   return Http::FilterDataStatus::Continue;
 }
 
@@ -255,7 +262,9 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 // Implementation Http::StreamEncoderFilter: http/JSON-> gRPC //
 ////////////////////////////////////////////////////////////////
 Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers, bool end_stream) {
-  auto session_status = lookupSession(encoder_callbacks_->streamId());
+  auto session_guard = SessionGuard(grpc_sessions_);
+  auto session_status = session_guard.lookupSession(encoder_callbacks_->streamId());
+
   if (!session_status.ok()) {
     ENVOY_STREAM_LOG(
         debug, "No gRPC Session found for this stream. Forwarded response headers unmodified.",
@@ -273,7 +282,6 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
                      "message with converted status code downstream.",
                      *encoder_callbacks_, http_status);
 
-    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::ResponseNotOkay, grpc_status);
     return Http::FilterHeadersStatus::StopIteration;
   };
@@ -284,7 +292,6 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
                      "responses. Destroy session and send gRPC error downstream.",
                      *encoder_callbacks_);
 
-    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::ResponseHeaderOnly);
     return Http::FilterHeadersStatus::StopIteration;
   }
@@ -297,7 +304,6 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
                      "unsupported. Destroy session and send gRPC error downstream.",
                      *encoder_callbacks_);
 
-    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::UnexpectedContentType);
     return Http::FilterHeadersStatus::StopIteration;
   }
@@ -310,6 +316,7 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
   // before body transcoding. Memorize a pointer to the header map and use it
   // in decodeData().
   session->encoder_headers = &headers;
+  session_guard.keepAccessedSessionsAlive();
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -320,7 +327,8 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   // in our own internal buffer and convert the entire buffer at the end of the stream to pass the
   // result further. To achieve this the return code "StopIterationNoBuffer" disables the internal
   // buffering and "Continue" is used to pass on the contents "buffer".
-  auto session_status = lookupSession(encoder_callbacks_->streamId());
+  auto session_guard = SessionGuard(grpc_sessions_);
+  auto session_status = session_guard.lookupSession(encoder_callbacks_->streamId());
   if (!session_status.ok()) {
     ENVOY_STREAM_LOG(debug,
                      "No gRPC Session found for this stream. Forwarded response data unmodified.",
@@ -335,9 +343,21 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
     session->encoder_data.add(buffer);
   }
 
+  if (encoder_callbacks_->encoderBufferLimit() < session->encoder_data.length()) {
+    ENVOY_STREAM_LOG(error,
+                     "Buffered data exceed configured buffer limits. Destroy session and "
+                     "send gRPC error message downstream.",
+                     *encoder_callbacks_);
+
+    respondWithGrpcError(*encoder_callbacks_, Errors::BufferExceedsLimitError);
+    return Http::FilterDataStatus::StopIterationNoBuffer;
+  }
+
   if (!end_stream) {
     ENVOY_STREAM_LOG(debug, "End of stream is not reached. Return and wait for more data.",
                      *encoder_callbacks_);
+
+    session_guard.keepAccessedSessionsAlive();
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
@@ -349,7 +369,6 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
                      "send gRPC error message downstream. Error was: {}",
                      *encoder_callbacks_, transcoder_status.message());
 
-    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::InternalError);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -361,7 +380,6 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
                      "send gRPC error message downstream. Error was: '{}'",
                      *encoder_callbacks_, grpc_status.status().message());
 
-    destroySession(session);
     respondWithGrpcError(*encoder_callbacks_, Errors::JsonToGrpcFailed);
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
@@ -378,36 +396,8 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
   session->encoder_headers->setContentLength(buffer.length());
 
   ENVOY_STREAM_LOG(debug, "Processed Session successfully. Destroy session.", *encoder_callbacks_);
-  destroySession(session);
   return Http::FilterDataStatus::Continue;
 }
-
-absl::StatusOr<Filter::Session* const> Filter::createSession(SessionId sid) {
-  auto [pos, ok] = grpc_sessions_.insert({sid, Session{}});
-  if (!ok) {
-    return absl::FailedPreconditionError(
-        absl::StrCat("Session with sid ", sid, " already exists."));
-  }
-
-  // Initialize session after successful insertion.
-  auto* const session = &(pos->second);
-  session->id = sid;
-  session->decoder_headers = nullptr;
-  session->decoder_data = Buffer::OwnedImpl();
-  session->encoder_headers = nullptr;
-  session->encoder_data = Buffer::OwnedImpl();
-  return session;
-}
-
-absl::StatusOr<Filter::Session* const> Filter::lookupSession(SessionId sid) {
-  auto pos = grpc_sessions_.find(sid);
-  if (pos == grpc_sessions_.cend()) {
-    return absl::NotFoundError(absl::StrCat("Failed to lookup session with id ", sid));
-  }
-  return &(pos->second);
-}
-
-void Filter::destroySession(Session* const session) { grpc_sessions_.erase(session->id); }
 
 template <class CallbackType>
 void Filter::respondWithGrpcError(CallbackType& callback_type, const std::string_view description,
