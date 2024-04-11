@@ -161,26 +161,28 @@ absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_desc
     // We care only about to level definitions. No recursive message field tree resolution happens
     // here.
     auto const* request_descriptor = method_descriptor->input_type();
-    auto const is_request_http_body = isHttpBodyType(request_descriptor, type_helper, http_rule);
-    if (!is_request_http_body.ok()) {
+    auto const is_request_http_body_or = isHttpBodyType(request_descriptor, type_helper, http_rule);
+    if (!is_request_http_body_or.ok()) {
       return absl::InternalError(
           absl::StrCat("Failed to determine if request type ", request_descriptor->full_name(),
-                       " is http body. Error was: ", is_request_http_body.status().message()));
+                       " is http body. Error was: ", is_request_http_body_or.status().message()));
     }
-    ENVOY_LOG(debug, "Is Request Type a HTTP Body Message: {}", *is_request_http_body);
+    ENVOY_LOG(debug, "Is Request Type a HTTP Body Message: {}", *is_request_http_body_or);
 
     auto const* response_descriptor = method_descriptor->output_type();
-    auto const is_response_http_body = isHttpBodyType(response_descriptor, type_helper, http_rule);
-    if (!is_response_http_body.ok()) {
+    auto const is_response_http_body_or =
+        isHttpBodyType(response_descriptor, type_helper, http_rule);
+    if (!is_response_http_body_or.ok()) {
       return absl::InternalError(
           absl::StrCat("Failed to determine if response type ", response_descriptor->full_name(),
-                       " is http body. Error was: ", is_response_http_body.status().message()));
+                       " is http body. Error was: ", is_response_http_body_or.status().message()));
     }
-    ENVOY_LOG(debug, "Is Response Type a HTTP Body Message: {}", *is_response_http_body);
+    ENVOY_LOG(debug, "Is Response Type a HTTP Body Message: {}", *is_response_http_body_or);
 
     // Create method info and store it.
-    auto method_info = MethodInfo{method_descriptor, request_descriptor,    response_descriptor,
-                                  http_rule,         *is_request_http_body, *is_response_http_body};
+    auto method_info =
+        MethodInfo{method_descriptor, request_descriptor,       response_descriptor,
+                   http_rule,         *is_request_http_body_or, *is_response_http_body_or};
 
     ENVOY_LOG(debug, "Store method descriptors for: {}", method_descriptor->name());
     grpc_method_infos.emplace(method_descriptor->name(), std::move(method_info));
@@ -272,6 +274,7 @@ absl::StatusOr<TranscodingType> Transcoder::Impl::mapResponseFrom() const {
   if (selected_grpc_method_ == nullptr) {
     return absl::FailedPreconditionError("No method to transcode selected. Abort.");
   }
+
   if (selected_grpc_method_->response_type_is_http_body) {
     return TranscodingType::HttpBody;
   }
