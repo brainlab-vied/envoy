@@ -1,4 +1,5 @@
 #include "envoy/http/filter.h"
+#include "absl/status/status.h"
 #include "envoy/http/header_map.h"
 
 #include "source/common/grpc/codec.h"
@@ -10,6 +11,7 @@
 #include "filter.h"
 #include "http_methods.h"
 
+// TODO: Rename values to StatusOr Types to recommended _or notation
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 namespace {
 // Internal constants
@@ -27,6 +29,11 @@ const auto ResponseHeaderOnly = "HTTP_response_is_header_only";
 const auto BufferExceedsLimitError = "Buffered_data_exceeds_configured_limit";
 const auto InternalError = "Internal_Error_in_Plugin_occurred";
 } // namespace Errors
+//
+namespace ContentTypes {
+const auto Grpc = Http::Headers::get().ContentTypeValues.Grpc;
+const auto Json = Http::Headers::get().ContentTypeValues.Json;
+} // namespace ContentTypes
 
 // Internal functions
 void clearBuffer(Buffer::Instance& buffer) { buffer.drain(buffer.length()); }
@@ -58,7 +65,10 @@ Grpc::Status::GrpcStatus grpcStatusFromHttpStatus(uint64_t http_status) {
 Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string service_name)
     : transcoder_{}, grpc_sessions_{} {
   auto const status = transcoder_.init(api, proto_descriptor_path, service_name);
-  assert(status.ok());
+  if (!status.ok()) {
+    ENVOY_LOG(critical, "Failed to intialize transcoder. Error was: {}", status.message());
+    assert(false);
+  }
 }
 
 /////////////////////////////////////////////////////////////////
@@ -136,7 +146,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
     return Http::FilterHeadersStatus::StopIteration;
   }
 
-  // Rewrite HTTP Headers
+  // Transform shared HTTP Headers
   auto path_status = transcoder_.getHttpRequestPath();
   if (!path_status.ok()) {
     ENVOY_STREAM_LOG(error,
@@ -150,17 +160,38 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
   headers.setEnvoyOriginalPath(headers.getPathValue());
   headers.setPath(std::move(*path_status));
-  headers.setContentType(Http::Headers::get().ContentTypeValues.Json);
-  headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Json);
   headers.removeTE();
+
+  // Transform HTTP Headers by type.
+  auto const transcoding_type_status = transcoder_.mapRequestTo();
+  if (!transcoding_type_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to lookup transcoding type. Destroy session and "
+                     "send gRPC error message downstream. Error was: {}",
+                     *decoder_callbacks_, transcoding_type_status.status().message());
+
+    respondWithGrpcError(*decoder_callbacks_, Errors::InternalError);
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+  switch (*transcoding_type_status) {
+  case TranscodingType::HttpJson: {
+    ENVOY_STREAM_LOG(debug, "Transcode request to HTTP/JSON. Set ContentType Header.",
+                     *decoder_callbacks_);
+    headers.setContentType(ContentTypes::Json);
+  } break;
+
+  case TranscodingType::HttpBody:
+    ENVOY_STREAM_LOG(debug, "Transcode request to HTTP/BODY. Remove ContentType header for now.",
+                     *decoder_callbacks_);
+    headers.removeContentType();
+    break;
+  };
 
   // NOTE: Content length handling. Since we don't know the content length
   // before body transcoding. Memorize a pointer to the header map and use it
   // in decodeData().
   session->decoder_headers = &headers;
   decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
-
-  // TODO: Handle HttpBody Messages
   session_guard.keepAccessedSessionsAlive();
   return Http::FilterHeadersStatus::Continue;
 }
@@ -207,55 +238,99 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
   }
 
   // From here on the entire data stream is collected and ready for transcoding.
-  // Strip gRPC Header from buffer and try to transcode buffered data.
-  if (session->decoder_data.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+  // In case transcoding fails for any reason: Send gRPC error message downstream and
+  // cleanup session.
+  auto const status = transcodeRequest(*session, buffer);
+  if (!status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "gRPC request data frame contains too few bytes to be a gRPC request. Destroy "
-                     "Session and send gRPC error message downstream.",
+                     "gRPC transcoding failed. Destroy "
+                     "Session and send gRPC error message downstream. Error was: {}",
                      *decoder_callbacks_);
-
-    respondWithGrpcError(*decoder_callbacks_, Errors::GrpcFrameTooSmall);
-    return Http::FilterDataStatus::StopIterationNoBuffer;
-  }
-  session->decoder_data.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
-
-  // From here on the entire data stream is collected and ready for transcoding, prepare it.
-  auto const transcoder_status = transcoder_.prepareTranscoding(session->method_and_path);
-  if (!transcoder_status.ok()) {
-    ENVOY_STREAM_LOG(error,
-                     "Failed to prepare Transcoder from HTTP Method and Path. Destroy session and "
-                     "send gRPC error message downstream. Error was: {}",
-                     *decoder_callbacks_, transcoder_status.message());
-
-    respondWithGrpcError(*decoder_callbacks_, Errors::InternalError);
+    respondWithGrpcError(*decoder_callbacks_, status.message());
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
-  auto json_status = transcoder_.grpcRequestToJson(session->decoder_data.toString());
+  // Transcoding was successful. Free this sessions buffer and keep session
+  // alive for a potential response as it is reused for a response.
   clearBuffer(session->decoder_data);
-
-  // If transcoding fails: Respond to initial sender with a http message containing an error.
-  if (!json_status.ok()) {
-    ENVOY_STREAM_LOG(error,
-                     "Failed to transcode http request from gRPC to JSON. Destroy session and gRPC "
-                     "error message downstream. Error was: '{}'",
-                     *decoder_callbacks_, json_status.status().message());
-
-    respondWithGrpcError(*decoder_callbacks_, Errors::GrpcToJsonFailed);
-    return Http::FilterDataStatus::StopIterationNoBuffer;
-  }
-
-  ENVOY_STREAM_LOG(debug, "Transcodeded http request from gRPC to JSON", *decoder_callbacks_);
-
-  // Replace buffer contents with transcoded JSON string
-  clearBuffer(buffer);
-  buffer.add(*json_status);
-
-  // Rewrite headers content length with the size of the buffers contents.
-  session->decoder_headers->setContentLength(buffer.length());
-
   session_guard.keepAccessedSessionsAlive();
   return Http::FilterDataStatus::Continue;
+}
+
+absl::Status Filter::transcodeRequest(Session& session, Buffer::Instance& outgoing_buffer) {
+  // Strip gRPC Header from buffer
+  if (session.decoder_data.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+    ENVOY_STREAM_LOG(
+        error,
+        "gRPC request data frame contains too few bytes to be a gRPC request. Abort Transcoding.",
+        *decoder_callbacks_);
+    return absl::OutOfRangeError(Errors::GrpcFrameTooSmall);
+  }
+  session.decoder_data.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
+
+  // Prepare Transcoding.
+  auto const transcoder_status = transcoder_.prepareTranscoding(session.method_and_path);
+  if (!transcoder_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to prepare Transcoder from HTTP Method and Path. Abort Transcoding. "
+                     "Error was: {}",
+                     *decoder_callbacks_, transcoder_status.message());
+    return absl::InternalError(Errors::InternalError);
+  }
+
+  // Transcode buffer depending on its type
+  auto const transcoding_type_status = transcoder_.mapRequestTo();
+  if (!transcoding_type_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to lookup transcoding type. Abort Transconding. "
+                     "Error was: {}",
+                     *decoder_callbacks_, transcoding_type_status.status().message());
+    return absl::InternalError(Errors::InternalError);
+  }
+
+  // Perform transcoding based on type
+  auto transcoding_status = absl::UnknownError("uninitialized");
+  switch (*transcoding_type_status) {
+  case TranscodingType::HttpJson:
+    transcoding_status = transcodeRequestToHttpJson(session, outgoing_buffer);
+    break;
+
+  case TranscodingType::HttpBody:
+    transcoding_status = transcodeRequestToHttpBody(session, outgoing_buffer);
+    break;
+  }
+
+  if (!transcoding_status.ok()) {
+    ENVOY_STREAM_LOG(error, "Transcoding failed. Forward error.", *decoder_callbacks_);
+    return transcoding_status;
+  }
+
+  // Rewrite headers common headers.
+  session.decoder_headers->setContentLength(outgoing_buffer.length());
+  return absl::OkStatus();
+}
+
+absl::Status Filter::transcodeRequestToHttpJson(Session& session,
+                                                Buffer::Instance& outgoing_buffer) {
+  auto json_status = transcoder_.grpcRequestToJson(session.decoder_data.toString());
+  if (!json_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to transcode HTTP request from gRPC to JSON. "
+                     "Error was: {}",
+                     *decoder_callbacks_, json_status.status().message());
+    return absl::InvalidArgumentError(Errors::GrpcToJsonFailed);
+  }
+  ENVOY_STREAM_LOG(debug, "Transcodeded HTTP request from gRPC to JSON", *decoder_callbacks_);
+
+  // Replace buffer contents with transcoded JSON string
+  clearBuffer(outgoing_buffer);
+  outgoing_buffer.add(*json_status);
+  return absl::OkStatus();
+}
+
+absl::Status Filter::transcodeRequestToHttpBody(Session&, Buffer::Instance&) {
+  // TODO: Implement me
+  return absl::UnimplementedError("transcodeRequestToHttpBody");
 }
 
 ////////////////////////////////////////////////////////////////
@@ -296,21 +371,49 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
     return Http::FilterHeadersStatus::StopIteration;
   }
 
-  // TODO: Add support HttpBody Messages
-  auto content_type = headers.getContentTypeValue();
-  if (content_type != Http::Headers::get().ContentTypeValues.Json) {
+  // Prepare Transcoding.
+  auto const transcoder_status = transcoder_.prepareTranscoding(session->method_and_path);
+  if (!transcoder_status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "Received HTTP response does not containing JSON payload. Content type is "
-                     "unsupported. Destroy session and send gRPC error downstream.",
-                     *encoder_callbacks_);
-
-    respondWithGrpcError(*encoder_callbacks_, Errors::UnexpectedContentType);
+                     "Failed to prepare Transcoder from HTTP Method and Path. Abort Transcoding. "
+                     "Error was: '{}'",
+                     *encoder_callbacks_, transcoder_status.message());
+    respondWithGrpcError(*encoder_callbacks_, Errors::InternalError);
     return Http::FilterHeadersStatus::StopIteration;
   }
 
-  // Modify Headers and proceed.
-  headers.setContentType(Http::Headers::get().ContentTypeValues.Grpc);
-  headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Grpc);
+  // Verify Headers depending on the methods transcoding type
+  auto const transcoding_type_status = transcoder_.mapRequestTo();
+  if (!transcoding_type_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to lookup transcoding type. Abort Transconding. "
+                     "Error was: {}",
+                     *encoder_callbacks_, transcoding_type_status.status().message());
+    respondWithGrpcError(*encoder_callbacks_, Errors::InternalError);
+    return Http::FilterHeadersStatus::StopIteration;
+  }
+
+  switch (*transcoding_type_status) {
+  case TranscodingType::HttpJson: {
+    if (headers.getContentTypeValue() != ContentTypes::Json) {
+      ENVOY_STREAM_LOG(error,
+                       "Received HTTP response does not containing JSON payload. Content type is "
+                       "unsupported. Destroy session and send gRPC error downstream.",
+                       *encoder_callbacks_);
+
+      respondWithGrpcError(*encoder_callbacks_, Errors::UnexpectedContentType);
+      return Http::FilterHeadersStatus::StopIteration;
+    }
+  } break;
+
+  case TranscodingType::HttpBody:
+    // Do nothing here. From gRPC definition, we don't know what the
+    // content type should be. We just accept what we get.
+    break;
+  }
+
+  // Modify common headers and proceed.
+  headers.setContentType(ContentTypes::Grpc);
 
   // NOTE: Content length handling. Since we don't know the content length
   // before body transcoding. Memorize a pointer to the header map and use it
@@ -361,42 +464,90 @@ Http::FilterDataStatus Filter::encodeData(Buffer::Instance& buffer, bool end_str
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
-  // From here on the entire data stream is collected and ready for transcoding, prepare it.
-  auto const transcoder_status = transcoder_.prepareTranscoding(session->method_and_path);
-  if (!transcoder_status.ok()) {
+  // From here on the entire data stream is collected and ready for transcoding.
+  // In case transcoding fails for any reason: Send gRPC error message downstream and
+  // cleanup session.
+  auto const status = transcodeResponse(*session, buffer);
+  if (!status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "Failed to prepare Transcoder from HTTP Method and Path. Destroy session and "
-                     "send gRPC error message downstream. Error was: {}",
-                     *encoder_callbacks_, transcoder_status.message());
-
-    respondWithGrpcError(*encoder_callbacks_, Errors::InternalError);
+                     "Reponse transcoding failed. Destroy "
+                     "Session and send gRPC error message downstream. Error was: {}",
+                     *encoder_callbacks_);
+    respondWithGrpcError(*encoder_callbacks_, status.message());
     return Http::FilterDataStatus::StopIterationNoBuffer;
   }
 
-  auto grpc_status = transcoder_.jsonResponseToGrpc(session->encoder_data.toString());
+  ENVOY_STREAM_LOG(debug, "Processed Session successfully. Destroy session.", *encoder_callbacks_);
+  return Http::FilterDataStatus::Continue;
+}
+
+absl::Status Filter::transcodeResponse(Session& session, Buffer::Instance& outgoing_buffer) {
+  auto const transcoder_status = transcoder_.prepareTranscoding(session.method_and_path);
+  if (!transcoder_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to prepare Transcoder from HTTP Method and Path. Abort Transcoding. "
+                     "Error was: {}",
+                     *encoder_callbacks_, transcoder_status.message());
+    return absl::InternalError(Errors::InternalError);
+  }
+
+  // Transcode buffer depending on its type
+  auto const transcoding_type_status = transcoder_.mapRequestTo();
+  if (!transcoding_type_status.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to lookup transcoding type. Abort Transconding. "
+                     "Error was: {}",
+                     *encoder_callbacks_, transcoding_type_status.status().message());
+    return absl::InternalError(Errors::InternalError);
+  }
+
+  // Perform transcoding based on assumend type
+  auto transcoding_status = absl::UnknownError("uninitialized");
+  switch (*transcoding_type_status) {
+  case TranscodingType::HttpJson:
+    transcoding_status = transcodeResponseFromHttpJson(session, outgoing_buffer);
+    break;
+
+  case TranscodingType::HttpBody:
+    transcoding_status = transcodeResponseFromHttpBody(session, outgoing_buffer);
+    break;
+  }
+
+  if (!transcoding_status.ok()) {
+    ENVOY_STREAM_LOG(error, "Transcoding failed. Forward error.", *encoder_callbacks_);
+    return transcoding_status;
+  }
+
+  // Rewrite transcoding type independent headers
+  session.encoder_headers->setContentLength(outgoing_buffer.length());
+
+  // Elide gRPC response status code from HTTP status code
+  auto& trailers = encoder_callbacks_->addEncodedTrailers();
+  auto const http_status = Http::Utility::getResponseStatus(*(session.encoder_headers));
+  trailers.setGrpcStatus(grpcStatusFromHttpStatus(http_status));
+  return absl::OkStatus();
+}
+
+absl::Status Filter::transcodeResponseFromHttpJson(Session& session,
+                                                   Buffer::Instance& outgoing_buffer) {
+  auto grpc_status = transcoder_.jsonResponseToGrpc(session.encoder_data.toString());
   if (!grpc_status.ok()) {
     ENVOY_STREAM_LOG(error,
-                     "Failed to transcode http response from JSON to gRPC. Destroy session and "
-                     "send gRPC error message downstream. Error was: '{}'",
+                     "Failed to transcode http response from JSON to gRPC. "
+                     "Error was: {}",
                      *encoder_callbacks_, grpc_status.status().message());
-
-    respondWithGrpcError(*encoder_callbacks_, Errors::JsonToGrpcFailed);
-    return Http::FilterDataStatus::StopIterationNoBuffer;
+    return absl::InternalError(Errors::JsonToGrpcFailed);
   }
 
   ENVOY_STREAM_LOG(debug, "Transcodeded http response from JSON to gRPC", *encoder_callbacks_);
 
-  // Replace buffer contents with transcoded gRPC message then update header and trailers
-  replaceBufferWithGrpcMessage(buffer, *grpc_status);
-
-  // Elide gRPC response status code from HTTP status code
-  auto& trailers = encoder_callbacks_->addEncodedTrailers();
-  auto const http_status = Http::Utility::getResponseStatus(*(session->encoder_headers));
-  trailers.setGrpcStatus(grpcStatusFromHttpStatus(http_status));
-  session->encoder_headers->setContentLength(buffer.length());
-
-  ENVOY_STREAM_LOG(debug, "Processed Session successfully. Destroy session.", *encoder_callbacks_);
-  return Http::FilterDataStatus::Continue;
+  // Replace buffer contents with transcoded gRPC message
+  replaceBufferWithGrpcMessage(outgoing_buffer, *grpc_status);
+  return absl::OkStatus();
+}
+absl::Status Filter::transcodeResponseFromHttpBody(Session&, Buffer::Instance&) {
+  // TODO: Implement me
+  return absl::UnimplementedError("Implement me");
 }
 
 template <class CallbackType>

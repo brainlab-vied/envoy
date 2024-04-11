@@ -7,6 +7,8 @@
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
+enum class TranscodingType { HttpJson, HttpBody };
+
 /**
  * Type handling the transformation from gRPC requests to JSON requests and from JSON responses to
  * gRPC responses.
@@ -49,6 +51,20 @@ public:
    *          "prepareTranscoding" was not called before.
    */
   absl::StatusOr<HttpPath> getHttpRequestPath() const;
+
+  /**
+   * @brief Query the data format a gRPC shall be mapped to.
+   * @returns The type of mapping that should occur on success.
+   *          An error is returned in case prepareTranscoding was not called.
+   */
+  absl::StatusOr<TranscodingType> mapRequestTo() const;
+
+  /**
+   * @brief Query the data format of response to map into gRPC.
+   * @returns The type of mapping that should occur on success.
+   *          An error is returned in case prepareTranscoding was not called.
+   */
+  absl::StatusOr<TranscodingType> mapResponseFrom() const;
 
   /**
    * @brief Convert gRPC request data to JSON data
