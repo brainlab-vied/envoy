@@ -65,8 +65,10 @@ Filter::Filter(Api::Api& api, std::string proto_descriptor_path, std::string ser
     : transcoder_{}, grpc_sessions_{} {
   auto const status = transcoder_.init(api, proto_descriptor_path, service_name);
   if (!status.ok()) {
-    ENVOY_LOG(critical, "Failed to intialize transcoder. Error was: {}", status.message());
-    assert(false);
+    const auto error =
+        absl::StrCat("Failed to intialize transcoder. Error was: ", status.message());
+    ENVOY_LOG(critical, error);
+    throwEnvoyExceptionOrPanic(error);
   }
 }
 
@@ -118,7 +120,7 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
     respondWithGrpcError(*decoder_callbacks_, Errors::InternalError);
     return Http::FilterHeadersStatus::StopIteration;
   }
-  auto* const session = *session_or;
+  auto* session = *session_or;
 
   auto const method_or = httpMethodFrom(headers.getMethodValue());
   if (!method_or.ok()) {
