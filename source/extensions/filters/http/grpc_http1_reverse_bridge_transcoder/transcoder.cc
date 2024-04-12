@@ -1,7 +1,9 @@
 #include <unordered_map>
 #include "google/api/annotations.pb.h"
 #include "google/api/http.pb.h"
+#include "google/api/httpbody.pb.h"
 #include "http_methods.h"
+#include "grpc_transcoding/type_helper.h"
 #include "source/common/protobuf/protobuf.h"
 #include "source/common/protobuf/utility.h"
 #include "source/common/common/logger.h"
@@ -15,6 +17,8 @@ struct MethodInfo {
   Protobuf::Descriptor const* request_descriptor;
   Protobuf::Descriptor const* response_descriptor;
   google::api::HttpRule http_rule;
+  bool request_type_is_http_body;
+  bool response_type_is_http_body;
 };
 
 std::string typeUrlFrom(Protobuf::Descriptor const* descriptor) {
@@ -26,6 +30,49 @@ std::string typeUrlFrom(Protobuf::Descriptor const* descriptor) {
     return "/" + full_name;
   }
   return full_name;
+}
+
+absl::StatusOr<bool> isHttpBodyType(Protobuf::Descriptor const* descriptor,
+                                    google::grpc::transcoding::TypeHelper const& type_helper,
+                                    google::api::HttpRule const& http_rule) {
+  // Constants
+  static const auto http_body_type_name = google::api::HttpBody::descriptor()->full_name();
+
+  // Try to lookup message type of given descriptor.
+  const auto type_url = typeUrlFrom(descriptor);
+  const auto* message_type = type_helper.Info()->GetTypeByTypeUrl(type_url);
+  if (message_type == nullptr) {
+    return absl::NotFoundError(
+        absl::StrCat("Unable to find message type of type ", type_url, ". Abort."));
+  }
+
+  // Normalize and resolve field path from http rule attribute. Setting "*" maps to ""
+  // The body field determines the top-level gRPC field that forms the sent HTTP messages body.
+  // This is the gRPC field were we want to check if contains a http body message.
+  std::string message_body_field_path{http_rule.body()};
+  if (message_body_field_path == "*") {
+    message_body_field_path.clear();
+  }
+
+  std::vector<ProtobufWkt::Field const*> message_body_fields;
+  const auto status =
+      type_helper.ResolveFieldPath(*message_type, message_body_field_path, &message_body_fields);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // Examine protobuf fields of given type descriptor. If there are none
+  // The given descriptor itself might be of type http body message, if there are fields
+  // A http body messages can only have a single and it must match the type name.
+  // If all of this is not fulfilled, it is no body message.
+  if (message_body_fields.empty()) {
+    return descriptor->full_name() == http_body_type_name;
+  } else if (message_body_fields.size() == 1) {
+    auto const* field_descriptor =
+        type_helper.Info()->GetTypeByTypeUrl(message_body_fields.back()->type_url());
+    return (field_descriptor && (field_descriptor->name() == http_body_type_name));
+  }
+  return false;
 }
 } // namespace
 
@@ -41,6 +88,8 @@ public:
                     std::string const& service_name);
   absl::Status prepareTranscoding(HttpMethodAndPath method_and_path);
   absl::StatusOr<std::string> getHttpRequestPath() const;
+  absl::StatusOr<TranscodingType> mapRequestTo() const;
+  absl::StatusOr<TranscodingType> mapResponseFrom() const;
   absl::StatusOr<std::string> grpcRequestToJson(std::string const& grpc_data) const;
   absl::StatusOr<std::string> jsonResponseToGrpc(std::string const& json_data) const;
 
@@ -93,6 +142,10 @@ absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_desc
         absl::StrCat("Failed to find service descriptor of: ", service_name));
   }
 
+  // Create temporary type helper to analyze given proto message
+  auto type_helper = google::grpc::transcoding::TypeHelper{
+      Protobuf::util::NewTypeResolverForDescriptorPool("", descriptors.get())};
+
   // Populate method resolver with all methods in given service
   MethodInfoMap grpc_method_infos;
   for (auto i = 0; i < service_descriptor->method_count(); ++i) {
@@ -103,10 +156,36 @@ absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_desc
       http_rule = method_descriptor->options().GetExtension(google::api::http);
     }
 
+    // NOTE: We examine the input and output type to figure out if it is a http_body message.
+    // Although http body messages are normal fields that can occur in any message
+    // We care only about to level definitions. No recursive message field tree resolution happens
+    // here.
+    auto const* request_descriptor = method_descriptor->input_type();
+    auto const is_request_http_body_or = isHttpBodyType(request_descriptor, type_helper, http_rule);
+    if (!is_request_http_body_or.ok()) {
+      return absl::InternalError(
+          absl::StrCat("Failed to determine if request type ", request_descriptor->full_name(),
+                       " is http body. Error was: ", is_request_http_body_or.status().message()));
+    }
+    ENVOY_LOG(debug, "Is Request Type a HTTP Body Message: {}", *is_request_http_body_or);
+
+    auto const* response_descriptor = method_descriptor->output_type();
+    auto const is_response_http_body_or =
+        isHttpBodyType(response_descriptor, type_helper, http_rule);
+    if (!is_response_http_body_or.ok()) {
+      return absl::InternalError(
+          absl::StrCat("Failed to determine if response type ", response_descriptor->full_name(),
+                       " is http body. Error was: ", is_response_http_body_or.status().message()));
+    }
+    ENVOY_LOG(debug, "Is Response Type a HTTP Body Message: {}", *is_response_http_body_or);
+
+    // Create method info and store it.
+    auto method_info =
+        MethodInfo{method_descriptor, request_descriptor,       response_descriptor,
+                   http_rule,         *is_request_http_body_or, *is_response_http_body_or};
+
     ENVOY_LOG(debug, "Store method descriptors for: {}", method_descriptor->name());
-    grpc_method_infos.emplace(method_descriptor->name(),
-                              MethodInfo{method_descriptor, method_descriptor->input_type(),
-                                         method_descriptor->output_type(), http_rule});
+    grpc_method_infos.emplace(method_descriptor->name(), std::move(method_info));
   }
 
   // From here on, nothing can fail on initialization anymore.
@@ -178,6 +257,30 @@ absl::StatusOr<HttpPath> Transcoder::Impl::getHttpRequestPath() const {
   return new_http_path;
 }
 
+absl::StatusOr<TranscodingType> Transcoder::Impl::mapRequestTo() const {
+  assert(isInitialized());
+  if (selected_grpc_method_ == nullptr) {
+    return absl::FailedPreconditionError("No method to transcode selected. Abort.");
+  }
+
+  if (selected_grpc_method_->request_type_is_http_body) {
+    return TranscodingType::HttpBody;
+  }
+  return TranscodingType::HttpJson;
+}
+
+absl::StatusOr<TranscodingType> Transcoder::Impl::mapResponseFrom() const {
+  assert(isInitialized());
+  if (selected_grpc_method_ == nullptr) {
+    return absl::FailedPreconditionError("No method to transcode selected. Abort.");
+  }
+
+  if (selected_grpc_method_->response_type_is_http_body) {
+    return TranscodingType::HttpBody;
+  }
+  return TranscodingType::HttpJson;
+}
+
 absl::StatusOr<std::string> Transcoder::Impl::grpcRequestToJson(std::string const& grpc) const {
   assert(isInitialized());
 
@@ -240,6 +343,11 @@ absl::Status Transcoder::prepareTranscoding(HttpMethodAndPath method_and_path) {
 
 absl::StatusOr<HttpPath> Transcoder::getHttpRequestPath() const {
   return pimpl_->getHttpRequestPath();
+}
+
+absl::StatusOr<TranscodingType> Transcoder::mapRequestTo() const { return pimpl_->mapRequestTo(); }
+absl::StatusOr<TranscodingType> Transcoder::mapResponseFrom() const {
+  return pimpl_->mapResponseFrom();
 }
 
 absl::StatusOr<std::string> Transcoder::grpcRequestToJson(std::string const& grpc_data) const {

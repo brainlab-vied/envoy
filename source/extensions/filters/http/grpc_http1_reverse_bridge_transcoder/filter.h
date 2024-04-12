@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/status/status.h"
 #include "envoy/extensions/filters/http/grpc_http1_reverse_bridge_transcoder/v3/config.pb.h"
 #include "envoy/http/filter.h"
 
@@ -30,6 +31,14 @@ public:
   Http::FilterDataStatus encodeData(Buffer::Instance& buffer, bool end_stream) override;
 
 private:
+  absl::Status transcodeRequest(Session& session, Buffer::Instance& outgoing_buffer);
+  absl::Status transcodeRequestToHttpJson(Session& session, Buffer::Instance& outgoing_buffer);
+  absl::Status transcodeRequestToHttpBody(Session& session, Buffer::Instance& outgoing_buffer);
+
+  absl::Status transcodeResponse(Session& session, Buffer::Instance& outgoing_buffer);
+  absl::Status transcodeResponseFromHttpJson(Session& session, Buffer::Instance& outgoing_buffer);
+  absl::Status transcodeResponseFromHttpBody(Session& session, Buffer::Instance& outgoing_buffer);
+
   template <class CallbackType>
   void respondWithGrpcError(CallbackType& callback_type, const std::string_view description);
 

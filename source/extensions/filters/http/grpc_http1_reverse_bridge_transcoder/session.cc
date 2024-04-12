@@ -30,7 +30,7 @@ absl::StatusOr<Session* const> SessionGuard::createSession(SessionId sid) {
   session->encoder_headers = nullptr;
   session->encoder_data = Buffer::OwnedImpl();
 
-  // Memorize point: The previous lookup ensures uniqueness and existance.
+  // Memorize id: The previous lookup ensures uniqueness and existence.
   used_sessions_.insert(session->id);
   return session;
 }

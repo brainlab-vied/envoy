@@ -49,8 +49,8 @@ public:
   explicit SessionGuard(SessionMap& sessions);
 
   /**
-   * DTOR: Deletes all accessed session since guard constructions.
-   * calling keepAccessedSessionAlive prevents the cleanup.
+   * DTOR: Deletes all accessed sessions since guard constructions.
+   * calling keepAccessedSessionAlive at any time prevents this behavior.
    */
   ~SessionGuard();
 
