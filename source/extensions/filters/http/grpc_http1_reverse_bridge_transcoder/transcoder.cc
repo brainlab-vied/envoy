@@ -1,12 +1,12 @@
 #include <unordered_map>
+#include "absl/status/status.h"
 #include "google/api/annotations.pb.h"
 #include "google/api/http.pb.h"
-#include "google/api/httpbody.pb.h"
 #include "http_methods.h"
 #include "grpc_transcoding/type_helper.h"
-#include "source/common/protobuf/protobuf.h"
-#include "source/common/protobuf/utility.h"
 #include "source/common/common/logger.h"
+#include "source/common/grpc/codec.h"
+#include "source/common/protobuf/utility.h"
 
 #include "transcoder.h"
 
@@ -17,6 +17,8 @@ struct MethodInfo {
   Protobuf::Descriptor const* request_descriptor;
   Protobuf::Descriptor const* response_descriptor;
   google::api::HttpRule http_rule;
+  HttpBodyUtils::ProtoMessageFields request_message_fields;
+  HttpBodyUtils::ProtoMessageFields response_message_fields;
   bool request_type_is_http_body;
   bool response_type_is_http_body;
 };
@@ -34,6 +36,7 @@ std::string typeUrlFrom(Protobuf::Descriptor const* descriptor) {
 
 absl::StatusOr<bool> isHttpBodyType(Protobuf::Descriptor const* descriptor,
                                     google::grpc::transcoding::TypeHelper const& type_helper,
+                                    HttpBodyUtils::ProtoMessageFields& message_fields,
                                     google::api::HttpRule const& http_rule) {
   // Constants
   static const auto http_body_type_name = google::api::HttpBody::descriptor()->full_name();
@@ -54,9 +57,8 @@ absl::StatusOr<bool> isHttpBodyType(Protobuf::Descriptor const* descriptor,
     message_body_field_path.clear();
   }
 
-  std::vector<ProtobufWkt::Field const*> message_body_fields;
   const auto status =
-      type_helper.ResolveFieldPath(*message_type, message_body_field_path, &message_body_fields);
+      type_helper.ResolveFieldPath(*message_type, message_body_field_path, &message_fields);
   if (!status.ok()) {
     return status;
   }
@@ -65,11 +67,11 @@ absl::StatusOr<bool> isHttpBodyType(Protobuf::Descriptor const* descriptor,
   // The given descriptor itself might be of type http body message, if there are fields
   // A http body messages can only have a single and it must match the type name.
   // If all of this is not fulfilled, it is no body message.
-  if (message_body_fields.empty()) {
+  if (message_fields.empty()) {
     return descriptor->full_name() == http_body_type_name;
-  } else if (message_body_fields.size() == 1) {
+  } else if (message_fields.size() == 1) {
     auto const* field_descriptor =
-        type_helper.Info()->GetTypeByTypeUrl(message_body_fields.back()->type_url());
+        type_helper.Info()->GetTypeByTypeUrl(message_fields.back()->type_url());
     return (field_descriptor && (field_descriptor->name() == http_body_type_name));
   }
   return false;
@@ -90,8 +92,12 @@ public:
   absl::StatusOr<std::string> getHttpRequestPath() const;
   absl::StatusOr<TranscodingType> mapRequestTo() const;
   absl::StatusOr<TranscodingType> mapResponseFrom() const;
-  absl::StatusOr<std::string> grpcRequestToJson(std::string const& grpc_data) const;
+  absl::StatusOr<std::string> grpcRequestToJson(Buffer::Instance& grpc_buffer) const;
   absl::StatusOr<std::string> jsonResponseToGrpc(std::string const& json_data) const;
+  absl::StatusOr<HttpBodyUtils::HttpBody>
+  grpcRequestToHttpBody(Buffer::Instance& grpc_buffer) const;
+  absl::StatusOr<std::string>
+  httpBodyResponseToGrpc(HttpBodyUtils::HttpBody const& http_body_data) const;
 
 private:
   bool isInitialized() const;
@@ -160,8 +166,10 @@ absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_desc
     // Although http body messages are normal fields that can occur in any message
     // We care only about to level definitions. No recursive message field tree resolution happens
     // here.
+    HttpBodyUtils::ProtoMessageFields request_message_fields;
     auto const* request_descriptor = method_descriptor->input_type();
-    auto const is_request_http_body_or = isHttpBodyType(request_descriptor, type_helper, http_rule);
+    auto const is_request_http_body_or =
+        isHttpBodyType(request_descriptor, type_helper, request_message_fields, http_rule);
     if (!is_request_http_body_or.ok()) {
       return absl::InternalError(
           absl::StrCat("Failed to determine if request type ", request_descriptor->full_name(),
@@ -169,9 +177,10 @@ absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_desc
     }
     ENVOY_LOG(debug, "Is Request Type a HTTP Body Message: {}", *is_request_http_body_or);
 
+    HttpBodyUtils::ProtoMessageFields response_message_fields;
     auto const* response_descriptor = method_descriptor->output_type();
     auto const is_response_http_body_or =
-        isHttpBodyType(response_descriptor, type_helper, http_rule);
+        isHttpBodyType(response_descriptor, type_helper, response_message_fields, http_rule);
     if (!is_response_http_body_or.ok()) {
       return absl::InternalError(
           absl::StrCat("Failed to determine if response type ", response_descriptor->full_name(),
@@ -180,9 +189,10 @@ absl::Status Transcoder::Impl::init(Api::Api& api, std::string const& proto_desc
     ENVOY_LOG(debug, "Is Response Type a HTTP Body Message: {}", *is_response_http_body_or);
 
     // Create method info and store it.
-    auto method_info =
-        MethodInfo{method_descriptor, request_descriptor,       response_descriptor,
-                   http_rule,         *is_request_http_body_or, *is_response_http_body_or};
+    auto method_info = MethodInfo{method_descriptor,        request_descriptor,
+                                  response_descriptor,      http_rule,
+                                  request_message_fields,   response_message_fields,
+                                  *is_request_http_body_or, *is_response_http_body_or};
 
     ENVOY_LOG(debug, "Store method descriptors for: {}", method_descriptor->name());
     grpc_method_infos.emplace(method_descriptor->name(), std::move(method_info));
@@ -281,13 +291,23 @@ absl::StatusOr<TranscodingType> Transcoder::Impl::mapResponseFrom() const {
   return TranscodingType::HttpJson;
 }
 
-absl::StatusOr<std::string> Transcoder::Impl::grpcRequestToJson(std::string const& grpc) const {
+absl::StatusOr<std::string>
+Transcoder::Impl::grpcRequestToJson(Buffer::Instance& grpc_buffer) const {
+  // Note: The simplified transconding can only work under the following conditions:
+  // - grpc_data contains the entire message (streaming is not supported).
   assert(isInitialized());
 
   if (selected_grpc_method_ == nullptr) {
     return absl::FailedPreconditionError("No method to transcode selected. Abort.");
   }
 
+  // Strip GRPC Header from message. The Transcoding message can't handle it.
+  if (grpc_buffer.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
+    return absl::FailedPreconditionError("Buffer to small to contain a gRPC message.");
+  }
+  grpc_buffer.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
+
+  // Perform Transcoding
   std::string json;
   Protobuf::util::JsonPrintOptions options;
   options.preserve_proto_field_names = true;
@@ -296,8 +316,8 @@ absl::StatusOr<std::string> Transcoder::Impl::grpcRequestToJson(std::string cons
   auto const url = typeUrlFrom(selected_grpc_method_->request_descriptor);
   ENVOY_LOG(debug, "Attempt transcoding of type url {} to JSON", url);
 
-  auto const status =
-      Protobuf::util::BinaryToJsonString(type_resolver_.get(), url, grpc, &json, options);
+  auto const status = Protobuf::util::BinaryToJsonString(type_resolver_.get(), url,
+                                                         grpc_buffer.toString(), &json, options);
   if (status.ok()) {
     return json;
   }
@@ -327,6 +347,28 @@ absl::StatusOr<std::string> Transcoder::Impl::jsonResponseToGrpc(std::string con
   return status;
 }
 
+absl::StatusOr<HttpBodyUtils::HttpBody>
+Transcoder::Impl::grpcRequestToHttpBody(Buffer::Instance& grpc_buffer) const {
+  assert(isInitialized());
+
+  if (selected_grpc_method_ == nullptr) {
+    return absl::FailedPreconditionError("No method to transcode selected. Abort.");
+  }
+  return HttpBodyUtils::parseByMessageFields(grpc_buffer,
+                                             selected_grpc_method_->request_message_fields);
+}
+
+absl::StatusOr<std::string>
+Transcoder::Impl::httpBodyResponseToGrpc(HttpBodyUtils::HttpBody const& http_body_data) const {
+  assert(isInitialized());
+
+  if (selected_grpc_method_ == nullptr) {
+    return absl::FailedPreconditionError("No method to transcode selected. Abort.");
+  }
+  return HttpBodyUtils::serializeByMessageFields(http_body_data,
+                                                 selected_grpc_method_->response_message_fields);
+}
+
 // Pimpl call delegations
 Transcoder::Transcoder() : pimpl_{std::make_unique<Impl>()} {}
 
@@ -346,15 +388,26 @@ absl::StatusOr<HttpPath> Transcoder::getHttpRequestPath() const {
 }
 
 absl::StatusOr<TranscodingType> Transcoder::mapRequestTo() const { return pimpl_->mapRequestTo(); }
+
 absl::StatusOr<TranscodingType> Transcoder::mapResponseFrom() const {
   return pimpl_->mapResponseFrom();
 }
 
-absl::StatusOr<std::string> Transcoder::grpcRequestToJson(std::string const& grpc_data) const {
-  return pimpl_->grpcRequestToJson(grpc_data);
+absl::StatusOr<std::string> Transcoder::grpcRequestToJson(Buffer::Instance& grpc_buffer) const {
+  return pimpl_->grpcRequestToJson(grpc_buffer);
 }
 
 absl::StatusOr<std::string> Transcoder::jsonResponseToGrpc(std::string const& json_data) const {
   return pimpl_->jsonResponseToGrpc(json_data);
+}
+
+absl::StatusOr<HttpBodyUtils::HttpBody>
+Transcoder::grpcRequestToHttpBody(Buffer::Instance& grpc_buffer) const {
+  return pimpl_->grpcRequestToHttpBody(grpc_buffer);
+}
+
+absl::StatusOr<std::string>
+Transcoder::httpBodyResponseToGrpc(HttpBodyUtils::HttpBody const& http_body_data) const {
+  return pimpl_->httpBodyResponseToGrpc(http_body_data);
 }
 } // namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder
