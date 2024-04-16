@@ -1,9 +1,11 @@
 #pragma once
 
 #include <memory>
-#include <absl/status/status.h>
-#include <absl/status/statusor.h>
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "envoy/buffer/buffer.h"
 #include "http_methods.h"
+#include "http_body_utils.h"
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 
@@ -68,11 +70,11 @@ public:
 
   /**
    * @brief Convert gRPC request data to JSON data
-   * @param[in] grpc_data string containing gRPC payload to try conversion on.
-   * @returns On success: A string containing the JSON representation of @p grpc_data.
+   * @param[in] grpc_buffer buffer containing gRPC payload to try conversion on.
+   * @returns On success: A string containing the JSON representation of @p grpc_buffer.
    *          On failure: The error indicating why the conversion failed.
    */
-  absl::StatusOr<std::string> grpcRequestToJson(std::string const& grpc_data) const;
+  absl::StatusOr<std::string> grpcRequestToJson(Buffer::Instance& grpc_buffer) const;
 
   /**
    * @brief Convert JSON response data to gRPC data
@@ -81,6 +83,24 @@ public:
    *          On failure: The error indicating why the conversion failed.
    */
   absl::StatusOr<std::string> jsonResponseToGrpc(std::string const& json_data) const;
+
+  /**
+   * @brief Convert gRPC request data to HTTP Body data
+   * @param[in] grpc_buffer buffer containing gRPC payload to try conversion on.
+   * @returns On success: A HTTP body protobuf message representing of @p grpc_buffer.
+   *          On failure: The error indicating why the conversion failed.
+   */
+  absl::StatusOr<HttpBodyUtils::HttpBody>
+  grpcRequestToHttpBody(Buffer::Instance& grpc_buffer) const;
+
+  /**
+   * @brief Convert HTTP Body message into gRPC response
+   * @param[in] http_body_data http body message to try conversion on.
+   * @returns On success: A series of bytes representing @p HTTP body protobuf message.
+   *          On failure: The error indicating why the conversion failed.
+   */
+  absl::StatusOr<std::string>
+  httpBodyResponseToGrpc(HttpBodyUtils::HttpBody const& http_body_data) const;
 
 private:
   class Impl;

@@ -1,15 +1,13 @@
 #include "envoy/http/filter.h"
 #include "absl/status/status.h"
 #include "envoy/http/header_map.h"
-
 #include "source/common/grpc/codec.h"
 #include "source/common/grpc/common.h"
 #include "source/common/grpc/status.h"
 #include "source/common/http/headers.h"
 #include "source/common/http/utility.h"
-
-#include "filter.h"
 #include "http_methods.h"
+#include "filter.h"
 
 namespace Envoy::Extensions::HttpFilters::GrpcHttp1ReverseBridgeTranscoder {
 namespace {
@@ -20,9 +18,10 @@ const auto UnexpectedMethodType = "HTTP_method_type_is_unexpected";
 const auto UnexpectedRequestPath = "HTTP_request_path_is_unexpected";
 const auto UnexpectedContentType = "HTTP_header_contains_unexpected_content_type";
 const auto GrpcUnexpectedRequestPath = "gRPC_request_path_is_unexpected";
-const auto GrpcFrameTooSmall = "gRPC_Frame_content_is_too_small";
 const auto GrpcToJsonFailed = "Failed_to_transcode_gRPC_to_JSON";
 const auto JsonToGrpcFailed = "Failed_to_transcode_JSON_to_gRPC";
+const auto GrpcToHttpBodyFailed = "Failed_to_transcode_gRPC_to_HTTP_body";
+const auto HttpBodyToGrpcFailed = "Failed_to_transcode_HTTP_body_to_gRPC";
 const auto ResponseNotOkay = "HTTP_response_status_code_is_not_okay";
 const auto ResponseHeaderOnly = "HTTP_response_is_header_only";
 const auto BufferExceedsLimitError = "Buffered_data_exceeds_configured_limit";
@@ -163,6 +162,8 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
   headers.setPath(std::move(*path_or));
   headers.removeTE();
 
+  // TODO: Remove any traces from gRPC specific headers (e.g. grpc-accept-encoding)
+
   // Transform HTTP Headers by type.
   auto const transcoding_type_or = transcoder_.mapRequestTo();
   if (!transcoding_type_or.ok()) {
@@ -259,16 +260,6 @@ Http::FilterDataStatus Filter::decodeData(Buffer::Instance& buffer, bool end_str
 }
 
 absl::Status Filter::transcodeRequest(Session& session, Buffer::Instance& outgoing_buffer) {
-  // Strip gRPC Header from buffer
-  if (session.decoder_data.length() < Grpc::GRPC_FRAME_HEADER_SIZE) {
-    ENVOY_STREAM_LOG(
-        error,
-        "gRPC request data frame contains too few bytes to be a gRPC request. Abort Transcoding.",
-        *decoder_callbacks_);
-    return absl::OutOfRangeError(Errors::GrpcFrameTooSmall);
-  }
-  session.decoder_data.drain(Grpc::GRPC_FRAME_HEADER_SIZE);
-
   // Prepare Transcoding.
   auto status = transcoder_.prepareTranscoding(session.method_and_path);
   if (!status.ok()) {
@@ -306,14 +297,15 @@ absl::Status Filter::transcodeRequest(Session& session, Buffer::Instance& outgoi
     return status;
   }
 
-  // Rewrite headers common headers.
+  // Rewrite common headers after transcoding.
   session.decoder_headers->setContentLength(outgoing_buffer.length());
   return absl::OkStatus();
 }
 
 absl::Status Filter::transcodeRequestToHttpJson(Session& session,
                                                 Buffer::Instance& outgoing_buffer) {
-  auto json_or = transcoder_.grpcRequestToJson(session.decoder_data.toString());
+  ENVOY_STREAM_LOG(debug, "Transcode HTTP request from gRPC to JSON.", *decoder_callbacks_);
+  auto json_or = transcoder_.grpcRequestToJson(session.decoder_data);
   if (!json_or.ok()) {
     ENVOY_STREAM_LOG(error,
                      "Failed to transcode HTTP request from gRPC to JSON. "
@@ -329,9 +321,25 @@ absl::Status Filter::transcodeRequestToHttpJson(Session& session,
   return absl::OkStatus();
 }
 
-absl::Status Filter::transcodeRequestToHttpBody(Session&, Buffer::Instance&) {
-  // TODO: Implement me
-  return absl::UnimplementedError("transcodeRequestToHttpBody");
+absl::Status Filter::transcodeRequestToHttpBody(Session& session,
+                                                Buffer::Instance& outgoing_buffer) {
+  ENVOY_STREAM_LOG(debug, "Transcode HTTP request from gRPC to HTTP Body.", *decoder_callbacks_);
+  auto http_body_or = transcoder_.grpcRequestToHttpBody(session.decoder_data);
+  if (!http_body_or.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to transcode HTTP request from gRPC to HTTP Body. "
+                     "Error was: {}",
+                     *decoder_callbacks_, http_body_or.status().message());
+    return absl::InvalidArgumentError(Errors::GrpcToHttpBodyFailed);
+  }
+  ENVOY_STREAM_LOG(debug, "Transcodeded HTTP request from gRPC to HTTP Body.", *decoder_callbacks_);
+
+  // Transcoding to HTTP Body was successful.
+  // Replace Buffer with body data and update the outgoing headers content type.
+  clearBuffer(outgoing_buffer);
+  outgoing_buffer.add(http_body_or->data());
+  session.decoder_headers->setContentType(http_body_or->content_type());
+  return absl::OkStatus();
 }
 
 ////////////////////////////////////////////////////////////////
@@ -413,12 +421,9 @@ Http::FilterHeadersStatus Filter::encodeHeaders(Http::ResponseHeaderMap& headers
     break;
   }
 
-  // Modify common headers and proceed.
-  headers.setContentType(ContentTypes::Grpc);
-
-  // NOTE: Content length handling. Since we don't know the content length
-  // before body transcoding. Memorize a pointer to the header map and use it
-  // in decodeData().
+  // Delayed header manipulation. Most header properties
+  // are determined by the received body data. Memorize a pointer to the
+  // header map for later manipulation.
   session->encoder_headers = &headers;
   session_guard.keepAccessedSessionsAlive();
   return Http::FilterHeadersStatus::Continue;
@@ -519,7 +524,8 @@ absl::Status Filter::transcodeResponse(Session& session, Buffer::Instance& outgo
     return status;
   }
 
-  // Rewrite transcoding type independent headers
+  // Modify common headers and proceed.
+  session.encoder_headers->setContentType(ContentTypes::Grpc);
   session.encoder_headers->setContentLength(outgoing_buffer.length());
 
   // Elide gRPC response status code from HTTP status code
@@ -546,9 +552,27 @@ absl::Status Filter::transcodeResponseFromHttpJson(Session& session,
   replaceBufferWithGrpcMessage(outgoing_buffer, *grpc_or);
   return absl::OkStatus();
 }
-absl::Status Filter::transcodeResponseFromHttpBody(Session&, Buffer::Instance&) {
-  // TODO: Implement me
-  return absl::UnimplementedError("Implement me");
+absl::Status Filter::transcodeResponseFromHttpBody(Session& session,
+                                                   Buffer::Instance& outgoing_buffer) {
+
+  // Construct HttpBody message from buffered data and try to transcode it
+  HttpBodyUtils::HttpBody http_body;
+  http_body.set_content_type(session.encoder_headers->getContentTypeValue());
+  http_body.set_data(session.encoder_data.toString());
+
+  auto grpc_or = transcoder_.httpBodyResponseToGrpc(http_body);
+  if (!grpc_or.ok()) {
+    ENVOY_STREAM_LOG(error,
+                     "Failed to transcode http response from HTTP Body to gRPC. "
+                     "Error was: {}",
+                     *encoder_callbacks_, grpc_or.status().message());
+    return absl::InternalError(Errors::HttpBodyToGrpcFailed);
+  }
+
+  ENVOY_STREAM_LOG(debug, "Transcodeded http response from HTTP Body to gRPC", *encoder_callbacks_);
+
+  replaceBufferWithGrpcMessage(outgoing_buffer, *grpc_or);
+  return absl::OkStatus();
 }
 
 template <class CallbackType>
